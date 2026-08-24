@@ -12,3 +12,8 @@ build/
 data/
 mlruns/
 wandb/
+
+.agents/skills/lavish/
+.claude/skills/lavish
+.lavish/
+skills-lock.json
