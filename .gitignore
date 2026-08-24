@@ -9,9 +9,9 @@ dist/
 build/
 *.egg-info/
 .env
-data/
 mlruns/
 wandb/
+dvc-storage/
 
 .agents/skills/lavish/
 .claude/skills/lavish
