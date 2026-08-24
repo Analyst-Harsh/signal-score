@@ -14,6 +14,7 @@ Agent-facing conventions and guardrails live in [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
 uv sync --group dev
+dvc pull
 make check
 ```
 

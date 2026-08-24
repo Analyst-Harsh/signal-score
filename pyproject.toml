@@ -34,6 +34,7 @@ dev = [
     "ruff>=0.9",
     "pyright>=1.1",
     "lefthook>=1.9",
+    "dvc>=3.67.1",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -44,6 +44,45 @@ else (controversy, not urgency) or leak post-hoc information.
 
 ---
 
+## 1b. Data Splitting & Freeze Strategy — locked
+
+The Promotion Gate (§3, rule 3) requires comparing every retrain candidate against current
+production "on the same frozen held-out set — never re-shuffled between retrain cycles."
+This section is the mechanism that makes that requirement concrete.
+
+- **The eval/test set is frozen by content, not by ratio.** It's created once, tracked with
+  DVC (`dvc add`), committed, and pinned with a git tag (e.g. `eval-set-v1`). Every future
+  promotion-gate comparison reads that exact file via `dvc get . <path> --rev eval-set-v1`
+  (or `dvc import`) — it is never regenerated from a fresh split, no matter how many times
+  the raw dataset gets refetched.
+- **Every future train/val split excludes the frozen eval set's issue numbers first.** The
+  frozen eval file itself is the single source of truth for that exclusion set — never a
+  separately maintained ID list that can drift out of sync:
+  ```python
+  frozen_eval_ids = {issue["number"] for issue in load_frozen_eval_set()}
+  candidate_pool = [issue for issue in full_pull if issue["number"] not in frozen_eval_ids]
+  train, val = split(candidate_pool)
+  ```
+- **The split is stratified and deterministic — hashed within each label group, not across
+  the whole pool.** `hash(issue_number) % 100` computed separately inside each of the three
+  `priority/*` buckets keeps train/val/test at consistent class proportions (no distribution
+  shift introduced by the split itself) and keeps a given issue's bucket stable as the
+  dataset grows across refetches — a plain pool-wide shuffle/hash gives neither guarantee.
+- **No class-count rebalancing at split time.** The natural class distribution
+  (critical-urgent 18.6% / important-soon 40.9% / backlog 40.5%) is imbalanced but not
+  severe. Undersampling the majority classes to force equal counts would just discard real,
+  correctly-labeled data. Imbalance is handled at training time instead —
+  `class_weight="balanced"` (scikit-learn) / `scale_pos_weight` (XGBoost) — consistent with
+  the PR-AUC / minority-class F1 / calibration metrics already specified for the promotion
+  gate (§3).
+- **Raw data refresh stays a full re-fetch, not incremental**, and that's safe specifically
+  *because* the eval set's freeze is a DVC+git-tag pin, independent of raw-pull recency —
+  not a "don't touch this file" convention that a careless refetch could violate. Full
+  re-fetch remains cheap at this dataset's scale (~130–200 GitHub API requests) and the
+  weekly retrain cadence (§2); revisit only if refetch cost becomes an actual bottleneck.
+
+---
+
 ## 2. Architecture (closed loop, no external dependencies)
 
 ```
