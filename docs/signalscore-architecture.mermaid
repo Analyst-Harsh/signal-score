@@ -1,0 +1,81 @@
+flowchart TB
+    subgraph DS["📥 DATA SOURCES"]
+        D1["kubernetes/kubernetes issues<br/>(priority/* labels — primary)"]
+        D1b["kubernetes-sigs/* repos<br/>(same taxonomy — volume/balance, optional)"]
+    end
+
+    subgraph HOLDOUT["🧊 GENERALIZATION TEST — never trained on"]
+        HO1["Rust or VS Code issues<br/>(different taxonomy — zero-shot eval only)"]
+    end
+
+    subgraph FP["🔧 FEATURE PIPELINE"]
+        F1["Text signals<br/>length, stack traces, urgency language"]
+        F2["GitHub metadata<br/>author assoc, labels, comments, age"]
+        F3["BGE embeddings<br/>(reused from DocMind)"]
+    end
+
+    subgraph TRAIN["🧪 TRAINING & EXPERIMENTATION"]
+        T1["Train / Val / Test split"]
+        T2["Model configs<br/>scikit-learn / XGBoost"]
+        T3["W&B<br/>experiment tracking"]
+    end
+
+    subgraph GATE["🚦 PROMOTION GATE"]
+        G1["Feature-pipeline<br/>unit tests"]
+        G2["Model I/O<br/>contract test"]
+        G3["Eval vs current production<br/>on held-out set"]
+    end
+
+    subgraph REG["📦 MODEL REGISTRY — MLflow"]
+        R1["Staging"]
+        R2["Production"]
+    end
+
+    subgraph SERVE["⚡ SERVING — FastAPI"]
+        S1["Loads production-tagged model"]
+        S2["/score endpoint"]
+    end
+
+    subgraph MON["📊 MONITORING — Evidently AI"]
+        M1["Input drift"]
+        M2["Prediction drift"]
+    end
+
+    subgraph RETRAIN["🔁 AUTOMATED RETRAINING"]
+        AR1["GitHub Actions<br/>weekly scheduled job"]
+    end
+
+    subgraph UI["🖥️ Next.js DASHBOARD"]
+        U1["Drift charts"]
+        U2["Prediction explorer"]
+        U3["Retraining history"]
+        U4["Threshold tuning"]
+    end
+
+    D1 --> F1 & F2 & F3
+    D1b -.optional supplement.-> F1 & F2 & F3
+    F1 & F2 & F3 --> T1 --> T2 --> T3
+    R2 -.zero-shot eval only.-> HO1
+    T3 --> G1 --> G2 --> G3
+    G3 -->|beats production| R2
+    G3 -->|fails to beat| R1
+    T3 -.registers candidate.-> R1
+
+    R2 --> S1 --> S2
+
+    S2 --> M1
+    S2 --> M2
+    M1 --> AR1
+    M2 --> AR1
+    AR1 -->|fresh data| T1
+
+    R2 -.version history.-> U3
+    M1 --> U1
+    M2 --> U1
+    S2 --> U2
+    R1 -.thresholds.-> U4
+
+    style R2 fill:#1a7f37,color:#fff
+    style R1 fill:#9a6700,color:#fff
+    style G3 fill:#8250df,color:#fff
+    style S2 fill:#0969da,color:#fff

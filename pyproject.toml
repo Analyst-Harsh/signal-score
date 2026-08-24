@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "signalscore"
+version = "0.1.0"
+description = "Classical ML scoring service predicting GitHub issue priority."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+dependencies = [
+    "requests>=2.31",
+    "pandas>=2.2",
+    "pydantic>=2.6",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "scikit-learn>=1.4",
+    "xgboost>=2.0",
+]
+serving = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5.0",
+    "ruff>=0.9",
+    "pyright>=1.1",
+    "lefthook>=1.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/signalscore"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/signalscore"]
+relative_files = true
+omit = ["tests/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "UP", "B", "C4", "N", "S", "SIM", "RUF",
+    "PT", "DTZ", "ASYNC", "ARG", "PERF", "TID",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.pyright]
+include = ["."]
+exclude = ["**/__pycache__", ".venv", "**/node_modules", "**/.*"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false

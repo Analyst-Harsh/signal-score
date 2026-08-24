@@ -1,0 +1,12 @@
+pre-commit:
+  parallel: true
+  commands:
+    ruff-check:
+      glob: "*.py"
+      run: uv run ruff check --fix {staged_files} && git add {staged_files}
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format {staged_files} && git add {staged_files}
+    pyright:
+      glob: "*.py"
+      run: uv run pyright {staged_files}
