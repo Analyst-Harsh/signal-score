@@ -17,3 +17,4 @@ wandb/
 .claude/skills/lavish
 .lavish/
 skills-lock.json
+.claude/*.lock
