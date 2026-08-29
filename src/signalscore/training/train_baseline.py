@@ -90,6 +90,17 @@ def extract_labels(rows: list[FeatureRow]) -> NDArray[np.str_]:
     return np.array([row.label.value for row in rows])
 
 
+def compute_feature_std(x: SparseMatrix) -> NDArray[np.float64]:
+    """Per-column std of the design matrix -- the scale correction that makes
+    coef_ magnitudes comparable across columns on different scales (idf-weighted,
+    row-L2-normalized TF-IDF terms vs. the raw {0,1} is_member_plus column).
+    Computed via E[x^2] - E[x]^2 so it works directly on the sparse matrix.
+    """
+    mean = np.asarray(x.mean(axis=0)).ravel()  # pyright: ignore
+    mean_sq = np.asarray(x.multiply(x).mean(axis=0)).ravel()  # pyright: ignore
+    return np.sqrt(np.maximum(mean_sq - mean**2, 0.0))
+
+
 def train_classifier(x_train: SparseMatrix, y_train: NDArray[np.str_]) -> LogisticRegression:
     # max_iter raised from sklearn's default 100: with word+char TF-IDF (tens of
     # thousands of columns) on ~7.7k rows, the default will very likely fail to
@@ -105,6 +116,7 @@ class BaselineArtifact:
     char_vectorizer: TfidfVectorizer
     model: LogisticRegression
     classes: list[str]
+    feature_std: NDArray[np.float64]
 
 
 def _per_class_f1(
@@ -208,6 +220,7 @@ def run_training_pipeline(
         char_vectorizer=vectorizers.char,
         model=model,
         classes=classes,
+        feature_std=compute_feature_std(x_train),
     )
     save_artifact(artifact, model_out)
     save_metrics(metrics, metrics_out)
