@@ -1,0 +1,26 @@
+[
+  {
+    "split": "train",
+    "n_rows": 7763,
+    "top1_author_share": 0.17145433466443386,
+    "top10_author_share": 0.3852891923225557,
+    "hhi": 0.03837947222005168,
+    "flagged": true
+  },
+  {
+    "split": "val",
+    "n_rows": 1756,
+    "top1_author_share": 0.18280182232346243,
+    "top10_author_share": 0.40660592255125283,
+    "hhi": 0.042972094374769745,
+    "flagged": true
+  },
+  {
+    "split": "test",
+    "n_rows": 2380,
+    "top1_author_share": 0.05084033613445378,
+    "top10_author_share": 0.25126050420168067,
+    "hhi": 0.01062001271096674,
+    "flagged": true
+  }
+]
