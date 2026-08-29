@@ -26,7 +26,12 @@ from signalscore.training.leakage_audit import (
     audit_label_drift,
     find_near_duplicates,
 )
-from signalscore.training.split import assemble_splits, determine_eval_cutoff, freeze_eval_set
+from signalscore.training.split import (
+    assemble_splits,
+    determine_eval_cutoff,
+    freeze_eval_set,
+    materialize_train_val,
+)
 
 DEFAULT_REPO = "kubernetes/kubernetes"
 # Last known-good count from docs/v0-feature-selection.md. A refetch is expected
@@ -42,6 +47,8 @@ def run_pipeline(
     frozen_eval_path: Path,
     split_out: Path,
     audit_dir: Path,
+    train_out: Path,
+    val_out: Path,
 ) -> None:
     config = load_label_mapping(label_mapping_path)
     raw_rows = list(load_raw_jsonl(raw_paths))
@@ -60,6 +67,8 @@ def run_pipeline(
     cutoff = determine_eval_cutoff(frame)
     frozen_eval_path.parent.mkdir(parents=True, exist_ok=True)
     freeze_eval_set(frame, cutoff, frozen_eval_path)
+
+    materialize_train_val(features_out, frozen_eval_path, train_out, val_out)
 
     assignments = assemble_splits(frame, frozen_eval_path)
     split_out.parent.mkdir(parents=True, exist_ok=True)
@@ -143,6 +152,8 @@ def main(argv: list[str] | None = None) -> None:
         frozen_eval_path=args.processed_dir / repo_dir_name / "eval_set_v1.jsonl",
         split_out=args.splits_dir / repo_dir_name / "split_assignments_v1.csv",
         audit_dir=args.audit_dir / repo_dir_name,
+        train_out=args.processed_dir / repo_dir_name / "train.jsonl",
+        val_out=args.processed_dir / repo_dir_name / "val.jsonl",
     )
 
 
