@@ -97,13 +97,16 @@ that work starts, extract to:
 class FeatureExtractor(Protocol):
     def extract(self, title: str, body: str, author_association: str | None) -> dict[str, Any]: ...
 
+
 class TextFeatureExtractor:
     def extract(self, title: str, body: str, author_association: str | None) -> dict[str, Any]:
         return extract_text_features(title, body)
 
+
 class MetadataFeatureExtractor:
     def extract(self, title: str, body: str, author_association: str | None) -> dict[str, Any]:
         return extract_metadata_features(author_association)
+
 
 class EmbeddingFeatureExtractor:  # added when BGE embedding work actually starts
     def __init__(self, model_name: str) -> None:
@@ -111,6 +114,7 @@ class EmbeddingFeatureExtractor:  # added when BGE embedding work actually start
 
     def extract(self, title: str, body: str, author_association: str | None) -> dict[str, Any]:
         return {"embedding": self._model.encode(f"{title}\n{body}")}
+
 
 class FeaturePipeline:
     def __init__(self, extractors: list[FeatureExtractor]) -> None:
@@ -148,7 +152,9 @@ skeleton with swappable steps, which is the definition of Template Method:
 class PromotionGate:
     """Skeleton is frozen per CLAUDE.md: unit tests -> contract -> margin eval."""
 
-    def run(self, candidate: TrainedModel, production: TrainedModel, eval_set: EvalSet) -> GateResult:
+    def run(
+        self, candidate: TrainedModel, production: TrainedModel, eval_set: EvalSet
+    ) -> GateResult:
         if not self.unit_tests_pass():
             return GateResult(passed=False, failed_stage="unit_tests")
         if not self.contract_test_pass(candidate):
@@ -158,7 +164,9 @@ class PromotionGate:
 
     def unit_tests_pass(self) -> bool: ...
     def contract_test_pass(self, candidate: TrainedModel) -> bool: ...
-    def head_to_head_margin(self, candidate: TrainedModel, production: TrainedModel, eval_set: EvalSet) -> float: ...
+    def head_to_head_margin(
+        self, candidate: TrainedModel, production: TrainedModel, eval_set: EvalSet
+    ) -> float: ...
 ```
 
 **Anti-pattern:** don't reach for this over Chain of Responsibility (§5) when
@@ -248,9 +256,11 @@ and shouldn't require touching a monolithic `if` ladder:
 class ValidationStep(Protocol):
     def check(self, payload: ScoreRequest) -> str | None: ...  # None = pass
 
+
 class RequiredFieldsStep:
     def check(self, payload: ScoreRequest) -> str | None:
         return "title must not be empty" if not payload.title.strip() else None
+
 
 class ValidationChain:
     def __init__(self, steps: list[ValidationStep]) -> None:
@@ -315,6 +325,7 @@ drift buffer without the scoring code knowing what watches it:
 ```python
 class DriftObserver(Protocol):
     def on_prediction(self, request: ScoreRequest, prediction: Priority) -> None: ...
+
 
 class ScoringService:
     def __init__(self, model: TrainedModel, observers: list[DriftObserver]) -> None:
