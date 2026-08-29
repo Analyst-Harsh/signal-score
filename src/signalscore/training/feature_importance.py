@@ -6,13 +6,19 @@ Run via:
 
 `LogisticRegression.coef_` (shape n_classes x n_features) already *is* the
 weight of every feature for every class; this module just names the columns
-and ranks them, reading the same coefficients three ways:
+and ranks them, reading the same coefficients four ways:
 
 - weight: the raw coefficient (log-odds per unit of that feature).
 - odds_ratio: exp(weight) -- the standard interpretable form of a logistic
   coefficient ("this token roughly Nx's the odds of this class").
-- importance_ratio: |weight| / sum(|weight|) for that class -- a 0..1 figure
-  that sums to 1, comparable to a tree model's feature_importances_.
+- std_weight: weight * artifact.feature_std -- the standardized coefficient.
+  Raw weight is NOT comparable across columns: idf-weighted, row-L2-normalized
+  TF-IDF terms and the raw {0,1} is_member_plus column are on very different
+  scales, so a bigger raw weight doesn't mean a bigger real effect (see
+  train_baseline.compute_feature_std). std_weight corrects for that and is
+  what ranking and importance_ratio are actually based on.
+- importance_ratio: |std_weight| / sum(|std_weight|) for that class -- a 0..1
+  figure that sums to 1, comparable to a tree model's feature_importances_.
 """
 
 import argparse
@@ -39,22 +45,25 @@ def combined_feature_names(artifact: BaselineArtifact) -> list[str]:
 def top_features_by_class(
     artifact: BaselineArtifact, top_n: int = 25
 ) -> dict[str, list[dict[str, Any]]]:
-    """Per class: top_n features ranked by |weight|, each with weight, odds_ratio,
-    and importance_ratio (see module docstring).
+    """Per class: top_n features ranked by |std_weight|, each with weight, odds_ratio,
+    std_weight, and importance_ratio (see module docstring).
     """
     names = combined_feature_names(artifact)
     coef = np.asarray(artifact.model.coef_, dtype=np.float64)  # pyright: ignore
+    std_coef = coef * artifact.feature_std
     result: dict[str, list[dict[str, Any]]] = {}
     for class_idx, class_name in enumerate(artifact.classes):
         weights: NDArray[np.float64] = coef[class_idx]
-        total_abs = float(np.abs(weights).sum())
-        ranked_idx = np.argsort(-np.abs(weights))[:top_n]
+        std_weights: NDArray[np.float64] = std_coef[class_idx]
+        total_abs = float(np.abs(std_weights).sum())
+        ranked_idx = np.argsort(-np.abs(std_weights))[:top_n]
         result[class_name] = [
             {
                 "feature": names[i],
                 "weight": float(weights[i]),
                 "odds_ratio": float(np.exp(weights[i])),
-                "importance_ratio": float(np.abs(weights[i])) / total_abs,
+                "std_weight": float(std_weights[i]),
+                "importance_ratio": float(np.abs(std_weights[i])) / total_abs,
             }
             for i in ranked_idx
         ]

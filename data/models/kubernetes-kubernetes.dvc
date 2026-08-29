@@ -1,6 +1,6 @@
 outs:
-- md5: 2f65db91b5f4fa76872025594fe795dd.dir
-  size: 6992557
+- md5: 980e97da12e00bedede37877432d6a46.dir
+  size: 7944803
   nfiles: 2
   hash: md5
   path: kubernetes-kubernetes

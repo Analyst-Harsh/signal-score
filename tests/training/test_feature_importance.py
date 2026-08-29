@@ -1,5 +1,6 @@
 """Tests for signalscore.training.feature_importance."""
 
+from collections import Counter
 from pathlib import Path
 
 import joblib
@@ -56,3 +57,30 @@ def test_top_features_by_class_importance_ratio_sums_to_one(tmp_path: Path) -> N
     for class_name in artifact.classes:
         ratios = [f["importance_ratio"] for f in report[class_name]]
         assert sum(ratios) == pytest.approx(1.0)
+
+
+def test_top_features_by_class_ranks_by_standardized_not_raw_weight(tmp_path: Path) -> None:
+    """Raw coef_ magnitude is not comparable across columns on different scales
+    (idf-weighted TF-IDF terms vs. the raw {0,1} is_member_plus column) -- ranking
+    and importance_ratio must be driven by weight * feature_std, not weight alone.
+    """
+    artifact = _fit_artifact(tmp_path)
+    names = combined_feature_names(artifact)
+    all_features = top_features_by_class(artifact, top_n=len(names))
+
+    # word and char_wb vocabularies can coincidentally share a literal string
+    # (e.g. a char 3-gram equal to a short word token) -- only check names that
+    # unambiguously map back to a single column's std.
+    unique_names = {name for name, count in Counter(names).items() if count == 1}
+    std_by_name = dict(zip(names, artifact.feature_std, strict=True))
+
+    for class_name in artifact.classes:
+        rows = all_features[class_name]
+        for row in rows:
+            if row["feature"] not in unique_names:
+                continue
+            expected_std_weight = row["weight"] * std_by_name[row["feature"]]
+            assert row["std_weight"] == pytest.approx(expected_std_weight)
+        # Ranked by |std_weight| descending -- not necessarily |weight| descending.
+        std_weights = [abs(row["std_weight"]) for row in rows]
+        assert std_weights == sorted(std_weights, reverse=True)

@@ -9,6 +9,7 @@ import joblib
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from scipy import sparse
 from sklearn.metrics import (  # pyright: ignore[reportMissingTypeStubs]
     average_precision_score,  # pyright: ignore[reportUnknownVariableType]
     brier_score_loss,  # pyright: ignore[reportUnknownVariableType]
@@ -23,6 +24,7 @@ from signalscore.training.train_baseline import (
     BaselineArtifact,
     FittedVectorizers,
     build_feature_matrix,
+    compute_feature_std,
     compute_metrics,
     fit_vectorizers,
     format_experiments_row,
@@ -135,6 +137,19 @@ def test_build_feature_matrix_appends_is_member_plus_as_last_column() -> None:
 
     assert matrix[0, -1] == 1.0
     assert matrix[1, -1] == 0.0
+
+
+def test_compute_feature_std_matches_numpy_column_std_on_a_dense_equivalent() -> None:
+    dense = np.array([[1.0, 0.0, 5.0], [0.0, 0.0, 5.0], [1.0, 1.0, 5.0], [0.0, 1.0, 5.0]])
+    x = sparse.csr_matrix(dense)  # pyright: ignore
+
+    std = compute_feature_std(x)
+
+    # ddof=0 (population std) matches E[x^2] - E[x]^2, and the constant
+    # last column (always 5.0, like a feature with zero real spread) must
+    # come out as std 0, not blow up or go slightly negative under sqrt.
+    assert std == pytest.approx(dense.std(axis=0, ddof=0))
+    assert std[2] == pytest.approx(0.0)
 
 
 def test_compute_metrics_on_a_hand_verified_tiny_case() -> None:
