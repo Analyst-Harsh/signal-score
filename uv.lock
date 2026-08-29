@@ -1869,6 +1869,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "requests" },
 ]
 
@@ -1898,6 +1899,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.31" },
     { name = "scikit-learn", marker = "extra == 'ml'", specifier = ">=1.4" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'serving'", specifier = ">=0.29" },

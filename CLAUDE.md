@@ -11,6 +11,10 @@ Architecture and rules live in `docs/signalscore-design.md` and
 `docs/signalscore-architecture.mermaid`. Read them before touching pipeline
 logic — this file doesn't duplicate them, it points at them.
 
+Class-based design and Gang-of-Four pattern usage are governed by
+`docs/design-patterns-guide.md` — read it before choosing between a function
+and a class for new code.
+
 ## Module map
 
 | Module | Role |

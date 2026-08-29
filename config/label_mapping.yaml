@@ -1,0 +1,11 @@
+version: 1
+repos:
+  kubernetes/kubernetes:
+    role: train
+    mapping:
+      priority/critical-urgent: P0_critical
+      priority/important-soon: P1_soon
+      priority/backlog: P2_backlog
+    excluded_labels:
+      - priority/important-longterm
+      - priority/awaiting-more-evidence
