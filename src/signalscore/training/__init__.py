@@ -1,9 +1,14 @@
 """Training stage.
 
-Splits collected, featurized data into train/val/test sets, trains multiple
-scikit-learn and XGBoost model configs, and tracks each run in Weights &
-Biases. The best candidate is registered in the MLflow registry under the
-"staging" tag via `registry.py`, quarantined until it passes the promotion
-gate in `evaluation`. See docs/signalscore-design.md, the architecture and
-tech stack sections, for the full training-to-registry flow.
+`build_dataset.py` assembles the feature matrix (via `features.pipeline`) and
+splits it: `split.py` freezes a time-based eval/test set (most recent 20% by
+`created_at` — a random/stratified split was measured to inflate the
+majority-class baseline, see docs/priority-signal-decision.md) and
+hash-splits the remaining 80% into train/val. `leakage_audit.py` runs the
+near-duplicate, author-concentration, and label-drift checks before that
+split is DVC-frozen.
+
+Model training itself (sklearn/XGBoost configs, W&B tracking, registering
+"staging" via `registry.py`) is not yet implemented — see
+docs/signalscore-design.md for that planned flow.
 """
