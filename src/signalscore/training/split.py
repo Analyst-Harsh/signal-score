@@ -10,7 +10,7 @@ from the frozen file itself, never a separately maintained list.
 """
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -46,9 +46,13 @@ def freeze_eval_set(rows: Sequence[FeatureRow], cutoff: datetime, out_path: Path
             f.write(row.model_dump_json() + "\n")
 
 
-def load_frozen_eval_set(path: Path) -> list[FeatureRow]:
+def _load_feature_rows(path: Path) -> list[FeatureRow]:
     with path.open() as f:
         return [FeatureRow.model_validate_json(line) for line in f if line.strip()]
+
+
+def load_frozen_eval_set(path: Path) -> list[FeatureRow]:
+    return _load_feature_rows(path)
 
 
 def hash_split(
@@ -72,3 +76,35 @@ def assemble_splits(rows: Sequence[FeatureRow], frozen_eval_path: Path) -> dict[
     assignments.update({row.issue_number: "val" for row in val})
     assignments.update(dict.fromkeys(frozen_eval_ids, "test"))
     return assignments
+
+
+def write_split_jsonl(
+    rows: Sequence[FeatureRow], assignments: Mapping[int, str], split: str, out_path: Path
+) -> None:
+    """Writes rows whose assignment matches `split`, one FeatureRow JSON per line —
+    mirrors freeze_eval_set's write pattern.
+    """
+    if split == "test":
+        raise ValueError(
+            "write_split_jsonl must never be called with split='test'; "
+            "test rows come only from freeze_eval_set"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as f:
+        for row in rows:
+            if assignments.get(row.issue_number) == split:
+                f.write(row.model_dump_json() + "\n")
+
+
+def materialize_train_val(
+    features_path: Path, frozen_eval_path: Path, train_out: Path, val_out: Path
+) -> None:
+    """Rebuilds train.jsonl/val.jsonl from the already-materialized features_v1.jsonl +
+    the frozen eval set alone -- no raw data or full raw-pipeline rerun needed. Both
+    inputs are the exact two files DVC already tracks, so this works right after
+    `dvc pull`. Reuses assemble_splits, the single source of truth for split assignment.
+    """
+    frame = _load_feature_rows(features_path)
+    assignments = assemble_splits(frame, frozen_eval_path)
+    write_split_jsonl(frame, assignments, "train", train_out)
+    write_split_jsonl(frame, assignments, "val", val_out)

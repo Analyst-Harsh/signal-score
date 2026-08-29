@@ -82,3 +82,4 @@ model for, not a threshold rule.
 
 | Date | Model config | Dataset snapshot | PR-AUC | Minority F1 | Brier/ECE | Gate result | Notes |
 |---|---|---|---|---|---|---|---|
+| 2026-08-29 | baseline_v0: tfidf(word 1-2 + char_wb 3-5) + is_member_plus -> LogisticRegression | kubernetes-kubernetes | 0.5653 | 0.4824 | 0.1829 | n/a — no promotion gate yet | First real baseline run. accuracy=0.5564, macro_f1=0.5396 (clears the ≥46.8 macro-F1 target from `docs/priority-signal-decision.md`). Per-class F1: P0=0.482, P1=0.507, P2=0.629. `uv run python -m signalscore.training.train_baseline --train data/processed/kubernetes-kubernetes/train.jsonl --val data/processed/kubernetes-kubernetes/val.jsonl` |

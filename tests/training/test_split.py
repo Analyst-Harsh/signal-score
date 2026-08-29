@@ -4,6 +4,8 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
 from signalscore.training.split import (
@@ -13,6 +15,8 @@ from signalscore.training.split import (
     hash_split,
     issue_bucket,
     load_frozen_eval_set,
+    materialize_train_val,
+    write_split_jsonl,
 )
 
 
@@ -97,3 +101,60 @@ def test_assemble_splits_partitions_all_rows_with_no_overlap_and_no_drop(tmp_pat
     counts = Counter(assignments.values())
     assert set(counts.keys()) == {"train", "val", "test"}
     assert counts["test"] == 20
+
+
+def test_write_split_jsonl_writes_only_matching_split_rows(tmp_path: Path) -> None:
+    base = datetime(2020, 1, 1, tzinfo=UTC)
+    rows = [_row(n, base + timedelta(days=n)) for n in range(5)]
+    assignments = {0: "train", 1: "train", 2: "val", 3: "val", 4: "test"}
+    out_path = tmp_path / "train.jsonl"
+
+    write_split_jsonl(rows, assignments, "train", out_path)
+
+    loaded = load_frozen_eval_set(out_path)
+    assert {row.issue_number for row in loaded} == {0, 1}
+
+
+def test_write_split_jsonl_on_empty_split_writes_empty_file(tmp_path: Path) -> None:
+    base = datetime(2020, 1, 1, tzinfo=UTC)
+    rows = [_row(n, base + timedelta(days=n)) for n in range(3)]
+    assignments = {0: "train", 1: "train", 2: "train"}
+    out_path = tmp_path / "val.jsonl"
+
+    write_split_jsonl(rows, assignments, "val", out_path)
+
+    assert out_path.exists()
+    assert out_path.read_text() == ""
+
+
+def test_write_split_jsonl_rejects_test_split(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="split='test'"):
+        write_split_jsonl([], {}, "test", tmp_path / "test.jsonl")
+
+
+def test_materialize_train_val_from_files_alone(tmp_path: Path) -> None:
+    """Proves the standalone path: only features_v1.jsonl + the frozen eval set are
+    read -- no raw data, no full run_pipeline call.
+    """
+    base = datetime(2020, 1, 1, tzinfo=UTC)
+    rows = [_row(n, base + timedelta(days=n)) for n in range(100)]
+    features_path = tmp_path / "features_v1.jsonl"
+    with features_path.open("w") as f:
+        for row in rows:
+            f.write(row.model_dump_json() + "\n")
+
+    cutoff = determine_eval_cutoff(rows, eval_fraction=0.20)
+    frozen_eval_path = tmp_path / "eval_set_v1.jsonl"
+    freeze_eval_set(rows, cutoff, frozen_eval_path)
+    eval_ids = {row.issue_number for row in load_frozen_eval_set(frozen_eval_path)}
+
+    train_out = tmp_path / "train.jsonl"
+    val_out = tmp_path / "val.jsonl"
+    materialize_train_val(features_path, frozen_eval_path, train_out, val_out)
+
+    train_ids = {row.issue_number for row in load_frozen_eval_set(train_out)}
+    val_ids = {row.issue_number for row in load_frozen_eval_set(val_out)}
+    assert train_ids.isdisjoint(val_ids)
+    assert train_ids.isdisjoint(eval_ids)
+    assert val_ids.isdisjoint(eval_ids)
+    assert train_ids | val_ids | eval_ids == {row.issue_number for row in rows}

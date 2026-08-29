@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from signalscore.training.build_dataset import run_pipeline
+from signalscore.training.split import materialize_train_val
 
 LABEL_MAPPING_YAML = """
 version: 1
@@ -62,6 +63,8 @@ def test_run_pipeline_end_to_end_produces_consistent_outputs(tmp_path: Path) -> 
     frozen_eval_path = tmp_path / "eval_set_v1.jsonl"
     split_out = tmp_path / "split_assignments_v1.csv"
     audit_dir = tmp_path / "audit"
+    train_out = tmp_path / "train.jsonl"
+    val_out = tmp_path / "val.jsonl"
 
     run_pipeline(
         raw_paths=[raw_path],
@@ -71,6 +74,8 @@ def test_run_pipeline_end_to_end_produces_consistent_outputs(tmp_path: Path) -> 
         frozen_eval_path=frozen_eval_path,
         split_out=split_out,
         audit_dir=audit_dir,
+        train_out=train_out,
+        val_out=val_out,
     )
 
     feature_lines = features_out.read_text().splitlines()
@@ -90,3 +95,65 @@ def test_run_pipeline_end_to_end_produces_consistent_outputs(tmp_path: Path) -> 
     # beyond its header row.
     drift_lines = (audit_dir / "label_drift_v1.csv").read_text().splitlines()
     assert len(drift_lines) == 1
+
+    train_lines = train_out.read_text().splitlines()
+    val_lines = val_out.read_text().splitlines()
+    eval_lines = frozen_eval_path.read_text().splitlines()
+    assert len(train_lines) + len(val_lines) + len(eval_lines) == 50
+
+    train_ids = {json.loads(line)["issue_number"] for line in train_lines}
+    val_ids = {json.loads(line)["issue_number"] for line in val_lines}
+    eval_ids = {json.loads(line)["issue_number"] for line in eval_lines}
+    assert train_ids.isdisjoint(val_ids)
+    assert train_ids.isdisjoint(eval_ids)
+    assert val_ids.isdisjoint(eval_ids)
+    assert train_ids | val_ids | eval_ids == set(range(1, 51))
+
+    split_by_issue = {int(row["issue_number"]): row["split"] for row in rows}
+    assert all(split_by_issue[n] == "train" for n in train_ids)
+    assert all(split_by_issue[n] == "val" for n in val_ids)
+
+
+def test_run_pipeline_train_val_output_matches_standalone_materialize_train_val(
+    tmp_path: Path,
+) -> None:
+    """run_pipeline must exercise the same reusable path as any standalone caller —
+    not a separate in-memory shortcut that could silently drift from it.
+    """
+    base = datetime(2020, 1, 1, tzinfo=UTC)
+    labels = [
+        "priority/critical-urgent",
+        "priority/important-soon",
+        "priority/backlog",
+    ]
+    raw_rows = [_raw_issue(n, labels[n % 3], base + timedelta(days=n)) for n in range(1, 51)]
+
+    raw_path = tmp_path / "raw.jsonl"
+    with raw_path.open("w") as f:
+        for row in raw_rows:
+            f.write(json.dumps(row) + "\n")
+
+    label_mapping_path = tmp_path / "label_mapping.yaml"
+    label_mapping_path.write_text(LABEL_MAPPING_YAML)
+
+    features_out = tmp_path / "features_v1.jsonl"
+    frozen_eval_path = tmp_path / "eval_set_v1.jsonl"
+
+    run_pipeline(
+        raw_paths=[raw_path],
+        repo="kubernetes/kubernetes",
+        label_mapping_path=label_mapping_path,
+        features_out=features_out,
+        frozen_eval_path=frozen_eval_path,
+        split_out=tmp_path / "split_assignments_v1.csv",
+        audit_dir=tmp_path / "audit",
+        train_out=tmp_path / "train.jsonl",
+        val_out=tmp_path / "val.jsonl",
+    )
+
+    standalone_train_out = tmp_path / "standalone_train.jsonl"
+    standalone_val_out = tmp_path / "standalone_val.jsonl"
+    materialize_train_val(features_out, frozen_eval_path, standalone_train_out, standalone_val_out)
+
+    assert (tmp_path / "train.jsonl").read_text() == standalone_train_out.read_text()
+    assert (tmp_path / "val.jsonl").read_text() == standalone_val_out.read_text()
