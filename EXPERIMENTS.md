@@ -3,6 +3,36 @@
 Every real training run gets a row — including losses. The promotion gate
 saying "no" is the point, not a bug.
 
+## Week 1 — Dataset assembly & split (2026-08-29, snapshot `eval-set-v1`)
+
+Source: `data/raw/kubernetes-kubernetes` (12,025 raw rows across the 3
+label-queried JSONL files) → `training/build_dataset.py` → DVC-tracked
+`data/processed/kubernetes-kubernetes` + `data/splits/kubernetes-kubernetes`.
+
+**Drop report** (`DropReport`, recomputed from the raw corpus, not cached):
+
+| Stage | Rows | Delta |
+|---|---|---|
+| Raw rows (3 files, pre-dedup) | 12,025 | — |
+| Unique issues (post-dedup) | 11,991 | −34 duplicate fetches (same issue, multiple `priority/*` queries) |
+| Dropped: multi-priority conflict | | −34 (issue currently carries ≥2 `priority/*` labels, ambiguous) |
+| Dropped: `priority/important-longterm` (excluded) | | −56 |
+| Dropped: `priority/awaiting-more-evidence` (excluded) | | −2 |
+| **Kept** | **11,899** | 99.2% of unique issues retained |
+
+**Split** (time-based frozen test, hash-based train/val on the rest):
+
+| Split | Rows | Share |
+|---|---|---|
+| train | 7,763 | 65.2% |
+| val | 1,756 | 14.8% |
+| test (frozen, most-recent 20% by `created_at`) | 2,380 | 20.0% |
+| **Total** | **11,899** | 100% |
+
+Matches the design target (~65/15/20) exactly. `test` is frozen at git tag
+`eval-set-v1` and is never reshuffled; `train`/`val` are hash-bucketed
+(`VAL_BUCKET_CUTOFF = 19`) on the remaining 80%.
+
 ## Week 1 — EDA (2026-08-29, no model trained yet)
 
 Computed on the full assembled matrix (`features_v1.jsonl`, 11,899 rows,
