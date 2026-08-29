@@ -39,7 +39,7 @@ CLASS_TEXTS = {
 }
 
 
-def _row(
+def make_feature_row(
     issue_number: int,
     text: str,
     label: Priority = Priority.P2_BACKLOG,
@@ -65,7 +65,7 @@ def _row(
     )
 
 
-def _make_rows(n_per_class: int, start_issue: int = 0) -> list[FeatureRow]:
+def make_rows(n_per_class: int, start_issue: int = 0) -> list[FeatureRow]:
     """Enough repeated shared vocabulary per class to clear the locked spec's
     min_df=3 (word) / min_df=5 (char_wb) thresholds.
     """
@@ -74,22 +74,24 @@ def _make_rows(n_per_class: int, start_issue: int = 0) -> list[FeatureRow]:
     for label, text in CLASS_TEXTS.items():
         for i in range(n_per_class):
             rows.append(
-                _row(issue, f"{text} variant {i}", label=label, is_member_plus=(i % 2 == 0))
+                make_feature_row(
+                    issue, f"{text} variant {i}", label=label, is_member_plus=(i % 2 == 0)
+                )
             )
             issue += 1
     return rows
 
 
-def _write_rows(rows: list[FeatureRow], path: Path) -> None:
+def write_rows(rows: list[FeatureRow], path: Path) -> None:
     with path.open("w") as f:
         for row in rows:
             f.write(row.model_dump_json() + "\n")
 
 
 def test_load_feature_rows_round_trips(tmp_path: Path) -> None:
-    rows = [_row(1, "alpha"), _row(2, "beta")]
+    rows = [make_feature_row(1, "alpha"), make_feature_row(2, "beta")]
     path = tmp_path / "rows.jsonl"
-    _write_rows(rows, path)
+    write_rows(rows, path)
 
     loaded = load_feature_rows(path)
 
@@ -109,25 +111,25 @@ def test_fit_vectorizers_builds_vocabulary_from_given_texts_only() -> None:
 
 
 def test_build_feature_matrix_transforms_val_without_refitting() -> None:
-    train_rows = _make_rows(n_per_class=6)
+    train_rows = make_rows(n_per_class=6)
     vectorizers = fit_vectorizers([row.text for row in train_rows])
     word_vocabulary = cast("dict[str, int]", vectorizers.word.vocabulary_)  # pyright: ignore
     char_vocabulary = cast("dict[str, int]", vectorizers.char.vocabulary_)  # pyright: ignore
     expected_columns = len(word_vocabulary) + len(char_vocabulary) + 1
 
-    val_rows = [_row(999, "brandnewwordneverseenbefore in this corpus at all")]
+    val_rows = [make_feature_row(999, "brandnewwordneverseenbefore in this corpus at all")]
     matrix = build_feature_matrix(val_rows, vectorizers)
 
     assert matrix.shape == (1, expected_columns)
 
 
 def test_build_feature_matrix_appends_is_member_plus_as_last_column() -> None:
-    train_rows = _make_rows(n_per_class=6)
+    train_rows = make_rows(n_per_class=6)
     vectorizers = fit_vectorizers([row.text for row in train_rows])
 
     rows = [
-        _row(1, CLASS_TEXTS[Priority.P0_CRITICAL], is_member_plus=True),
-        _row(2, CLASS_TEXTS[Priority.P1_SOON], is_member_plus=False),
+        make_feature_row(1, CLASS_TEXTS[Priority.P0_CRITICAL], is_member_plus=True),
+        make_feature_row(2, CLASS_TEXTS[Priority.P1_SOON], is_member_plus=False),
     ]
     matrix = build_feature_matrix(rows, vectorizers).toarray()
 
@@ -249,12 +251,12 @@ def test_format_experiments_row_matches_column_order() -> None:
 
 
 def test_run_training_pipeline_end_to_end_writes_artifacts(tmp_path: Path) -> None:
-    train_rows = _make_rows(n_per_class=8)
-    val_rows = _make_rows(n_per_class=3, start_issue=1000)
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
     train_path = tmp_path / "train.jsonl"
     val_path = tmp_path / "val.jsonl"
-    _write_rows(train_rows, train_path)
-    _write_rows(val_rows, val_path)
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
 
     model_out = tmp_path / "model.joblib"
     metrics_out = tmp_path / "metrics.json"
@@ -285,12 +287,12 @@ def test_run_training_pipeline_end_to_end_writes_artifacts(tmp_path: Path) -> No
 
 
 def test_main_cli_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    train_rows = _make_rows(n_per_class=8)
-    val_rows = _make_rows(n_per_class=3, start_issue=1000)
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
     train_path = tmp_path / "train.jsonl"
     val_path = tmp_path / "val.jsonl"
-    _write_rows(train_rows, train_path)
-    _write_rows(val_rows, val_path)
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
 
     model_out = tmp_path / "model.joblib"
     metrics_out = tmp_path / "metrics.json"
