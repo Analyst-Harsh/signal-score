@@ -28,6 +28,7 @@ ml = [
 serving = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "structlog>=24.1",
 ]
 
 [dependency-groups]
@@ -39,6 +40,7 @@ dev = [
     "pyright>=1.1",
     "lefthook>=1.9",
     "dvc>=3.67.1",
+    "httpx2>=2.12.0",
 ]
 
 [tool.hatch.build.targets.wheel]
