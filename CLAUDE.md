@@ -49,6 +49,16 @@ and a class for new code.
 - Pyright strict handles type checking — no mypy.
 - Lefthook handles git hooks — no pre-commit.
 
+## Secrets (hard guardrail)
+
+Never read `.env` directly (no `Read`/`cat`/`grep`/etc. on it), and never source
+or export its contents into a tool/shell environment. Let application code
+(`python-dotenv`, `pydantic-settings`) load it internally — a real secret value
+must never land in agent context, tool output, or a transcript. `.env.example`
+holds only empty placeholders or non-secret defaults (e.g.
+`MLFLOW_TRACKING_URI`); if a real value ever appears there, treat it as a leak,
+flag it, and do not commit it.
+
 ## Data rules (hard guardrail)
 
 Never blend `priority/*`-taxonomy training data with a different label

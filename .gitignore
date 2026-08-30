@@ -10,6 +10,7 @@ build/
 *.egg-info/
 .env
 mlruns/
+mlflow.db
 wandb/
 dvc-storage/
 
