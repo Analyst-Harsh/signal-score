@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import mlflow
 import numpy as np
+import scipy
+import sklearn
 from numpy.typing import NDArray
 from scipy import sparse
 from sklearn.feature_extraction.text import (  # pyright: ignore[reportMissingTypeStubs]
@@ -37,8 +40,13 @@ from sklearn.preprocessing import (
 
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
+from signalscore.registry import ModelRegistry
+from signalscore.settings import Settings
 
 MODEL_VERSION = "baseline_v0"
+# Reused by registry/evaluation/serving later so the artifact filename lives
+# in one place instead of as a repeated inline literal.
+MODEL_ARTIFACT_FILENAME = "model.joblib"
 
 # scipy ships no py.typed marker, so every sparse-matrix boundary is Unknown to
 # pyright -- isolate that behind one alias rather than fighting each variance.
@@ -241,10 +249,48 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     repo_dir_name = args.train.parent.name
     default_dir = Path("data/models") / repo_dir_name / MODEL_VERSION
-    model_out = args.model_out or default_dir / "model.joblib"
+    model_out = args.model_out or default_dir / MODEL_ARTIFACT_FILENAME
     metrics_out = args.metrics_out or default_dir / "metrics.json"
 
-    metrics = run_training_pipeline(args.train, args.val, model_out, metrics_out)
+    train_rows = load_feature_rows(args.train)
+    val_rows = load_feature_rows(args.val)
+
+    mlflow.set_tracking_uri(Settings().mlflow_tracking_uri)  # pyright: ignore[reportUnknownMemberType]
+    with mlflow.start_run(  # pyright: ignore[reportUnknownMemberType]
+        run_name=f"{MODEL_VERSION}-{datetime.now(UTC):%Y%m%dT%H%M%S}"
+    ) as run:
+        mlflow.log_params(  # pyright: ignore[reportUnknownMemberType]
+            {
+                "model_version": MODEL_VERSION,
+                "word_ngram_range": "1-2",
+                "word_min_df": 3,
+                "char_ngram_range": "3-5",
+                "char_min_df": 5,
+                "char_max_features": 300_000,
+                "classifier": "LogisticRegression",
+                "class_weight": "balanced",
+                "max_iter": 1000,
+                # reproducibility: which library versions produced this artifact --
+                # joblib.load() is sensitive to exact minor-version mismatches, and
+                # mlflow.log_artifact() on a raw joblib dump (not mlflow.sklearn.log_model)
+                # skips MLflow's automatic environment capture, so this is the only record.
+                "sklearn_version": sklearn.__version__,
+                "numpy_version": np.__version__,
+                "scipy_version": scipy.__version__,
+                # data snapshot identity: repo_dir_name alone (already in EXPERIMENTS.md)
+                # doesn't say WHICH pull of that repo produced this candidate.
+                "train_row_count": len(train_rows),
+                "val_row_count": len(val_rows),
+            }
+        )
+        metrics = run_training_pipeline(args.train, args.val, model_out, metrics_out)
+        mlflow.log_metrics(  # pyright: ignore[reportUnknownMemberType]
+            {k: v for k, v in metrics.items() if k != "per_class_f1"}
+        )
+        mlflow.log_dict(metrics["per_class_f1"], "per_class_f1.json")  # pyright: ignore[reportUnknownMemberType]
+        mlflow.log_artifact(str(model_out), artifact_path="model")  # pyright: ignore[reportUnknownMemberType]
+        ModelRegistry().register_candidate(run_id=run.info.run_id)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+
     print(json.dumps(metrics, indent=2))
 
     row = format_experiments_row(

@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import cast
 
 import joblib
+import mlflow
 import numpy as np
 import pytest
+from mlflow.tracking import MlflowClient
 from numpy.typing import NDArray
 from scipy import sparse
 from sklearn.metrics import (  # pyright: ignore[reportMissingTypeStubs]
@@ -20,6 +22,7 @@ from sklearn.preprocessing import (
 
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
+from signalscore.registry import DEFAULT_MODEL_NAME
 from signalscore.training.train_baseline import (
     BaselineArtifact,
     FittedVectorizers,
@@ -334,6 +337,66 @@ def test_main_cli_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert '"macro_f1"' in out
     assert any(line.strip().startswith("|") for line in out.splitlines())
     assert "test run" in out
+
+
+def test_main_registers_staging_candidate_with_params_and_metrics_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real local SQLite MLflow instance, no mocking, per repo convention.
+    Asserts main() results in exactly one `staging` version registered, with
+    the hyperparameter/library-version/row-count params and the metrics (minus
+    per_class_f1, which is logged separately as a dict artifact) present on
+    its run.
+    """
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
+
+    # main() calls mlflow.set_tracking_uri(), which mutates process-global
+    # state (confirmed in tests/test_registry.py) -- capture the true prior
+    # state *before* pointing MLFLOW_TRACKING_URI at tmp_path, and restore it
+    # afterward so this test can't leak its tmp_path db into any other test.
+    original_tracking_uri = mlflow.get_tracking_uri()  # pyright: ignore[reportUnknownMemberType]
+
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
+    try:
+        main(
+            [
+                "--train",
+                str(train_path),
+                "--val",
+                str(val_path),
+                "--model-out",
+                str(tmp_path / "model.joblib"),
+                "--metrics-out",
+                str(tmp_path / "metrics.json"),
+            ]
+        )
+    finally:
+        mlflow.set_tracking_uri(original_tracking_uri)  # pyright: ignore[reportUnknownMemberType]
+
+    client = MlflowClient(tracking_uri=tracking_uri)
+    versions = client.search_model_versions(f"name='{DEFAULT_MODEL_NAME}'")
+    assert len(versions) == 1
+    version = versions[0]
+    assert version.tags.get("stage") == "staging"
+    assert version.run_id is not None
+
+    run = client.get_run(version.run_id)  # pyright: ignore[reportUnknownMemberType]
+    params: dict[str, str] = run.data.params  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    assert params["model_version"] == "baseline_v0"
+    assert params["classifier"] == "LogisticRegression"
+    assert params["class_weight"] == "balanced"
+    assert int(params["train_row_count"]) == len(train_rows)
+    assert int(params["val_row_count"]) == len(val_rows)
+
+    run_metrics: dict[str, float] = run.data.metrics  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    assert "macro_f1" in run_metrics
+    assert "per_class_f1" not in run_metrics
 
 
 def test_parse_args_accepts_explicit_train_and_val_paths() -> None:
