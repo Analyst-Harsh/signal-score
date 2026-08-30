@@ -19,6 +19,7 @@ import subprocess
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 from signalscore.evaluation import contract, margin
@@ -134,12 +135,29 @@ class UnitTestStep(GateStep):
 class ContractStep(GateStep):
     """Model I/O contract: schema, valid probabilities, no NaNs, latency
     bound, plus the DVC eval-set integrity check. See `contract.py`.
+
+    `eval_set_path` is a constructor default, not chain configurability --
+    same reasoning and same pattern as `UnitTestStep.test_path` above. The
+    real frozen eval set is DVC-tracked and gitignored (only its `.dvc`
+    pointer is committed); it lives in a machine-local DVC remote and is
+    never present on a CI runner, so any test exercising this step for real
+    must point it at a throwaway tmp_path git+dvc repo instead (see
+    tests/evaluation/test_gate.py). `build_promotion_gate()` never overrides
+    it, so production always validates the real frozen eval set.
     """
 
     name: ClassVar[str] = "contract"
 
+    def __init__(
+        self,
+        next_step: GateStep | None = None,
+        eval_set_path: Path = contract.EVAL_SET_PATH,
+    ) -> None:
+        super().__init__(next_step)
+        self._eval_set_path = eval_set_path
+
     def _check(self, ctx: GateContext) -> str | None:
-        return contract.check_model_contract(ctx)
+        return contract.check_model_contract(ctx, eval_set_path=self._eval_set_path)
 
 
 class MarginStep(GateStep):
@@ -160,15 +178,23 @@ class MarginStep(GateStep):
         return margin.evaluate_margin(ctx)
 
 
-def build_promotion_gate() -> GateStep:
+def build_promotion_gate(eval_set_path: Path = contract.EVAL_SET_PATH) -> GateStep:
     """The one place the chain is wired.
 
-    Fixed order, not caller-configurable -- unlike serving's /score
-    ValidationChain (design-patterns-guide.md Chain of Responsibility
-    example), which IS meant to be freely recomposed. No code path here
-    constructs a shorter or reordered chain: a caller-supplied `list[GateStep]`
-    would reintroduce the "step silently skipped" risk Hard Warning #4 flags,
-    so this stays a plain function returning a hard-coded chain, never a
-    public constructor parameter.
+    Fixed order and fixed set of steps, not caller-configurable -- unlike
+    serving's /score ValidationChain (design-patterns-guide.md Chain of
+    Responsibility example), which IS meant to be freely recomposed. No code
+    path here constructs a shorter or reordered chain, and there is no way to
+    skip a step: a caller-supplied `list[GateStep]` would reintroduce exactly
+    the "step silently skipped" risk Hard Warning #4 flags.
+
+    `eval_set_path` is the one legitimate knob, threaded straight to
+    `ContractStep` -- callers (`run_gate.py`'s `--eval-set`, and this
+    module's own tests) need to point the DVC integrity check at something
+    other than the real production eval set (real usage: a future
+    `eval-set-v2`; tests: a throwaway tmp_path git+dvc repo, since the real
+    eval set is DVC-tracked/gitignored and never present on a CI runner).
+    Defaults to the real frozen eval set, so an ordinary call still runs the
+    real check.
     """
-    return UnitTestStep(next_step=ContractStep(next_step=MarginStep()))
+    return UnitTestStep(next_step=ContractStep(next_step=MarginStep(), eval_set_path=eval_set_path))

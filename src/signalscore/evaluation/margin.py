@@ -49,11 +49,16 @@ _CI_PERCENTILE_LOWER = 2.5  # 95% CI lower bound
 MAX_BRIER_REGRESSION = 0.01
 
 
-def _score_artifact(
+def score_artifact(
     artifact: BaselineArtifact, rows: list[FeatureRow]
 ) -> tuple[NDArray[np.str_], NDArray[np.str_], NDArray[np.float64], list[str]]:
     """Transforms `rows` with `artifact`'s OWN fitted vectorizers (never the
     other artifact's) and returns (y_true, y_pred, y_proba, classes).
+
+    Public (not `_`-prefixed): `run_gate.py` (PR4) reuses this exact scoring
+    logic to compute the candidate's metrics for its `EXPERIMENTS.md` row,
+    rather than duplicating a third copy of "transform with an artifact's own
+    vectorizers, then predict" alongside this module and `contract.py`.
     """
     vectorizers = FittedVectorizers(word=artifact.word_vectorizer, char=artifact.char_vectorizer)
     x = build_feature_matrix(rows, vectorizers)
@@ -105,10 +110,10 @@ def evaluate_margin(ctx: GateContext) -> str | None:
     if ctx.production is None:
         return None
 
-    y_true, y_pred_candidate, proba_candidate, classes_candidate = _score_artifact(
+    y_true, y_pred_candidate, proba_candidate, classes_candidate = score_artifact(
         ctx.candidate, ctx.eval_rows
     )
-    _, y_pred_production, proba_production, classes_production = _score_artifact(
+    _, y_pred_production, proba_production, classes_production = score_artifact(
         ctx.production, ctx.eval_rows
     )
 

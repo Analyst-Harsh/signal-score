@@ -9,7 +9,7 @@ from signalscore.evaluation.gate import (
     UnitTestStep,
     build_promotion_gate,
 )
-from tests.evaluation._helpers import build_artifact, make_rows
+from tests.evaluation._helpers import build_artifact, init_frozen_git_dvc_repo, make_rows
 
 # --- UnitTestStep -----------------------------------------------------------
 
@@ -43,16 +43,20 @@ def test_unit_test_step_fails_when_pointed_at_a_failing_file(tmp_path: Path) -> 
 # --- ContractStep -------------------------------------------------------
 
 
-def test_contract_step_passes_for_a_healthy_candidate() -> None:
-    """Exercises the real default eval-set path (ContractStep offers no
-    override -- by design, it always checks the real frozen eval set). This
-    repo's data/processed/kubernetes-kubernetes/eval_set_v1.jsonl is expected
-    to match the eval-set-v1 tag it was frozen at, so this is a real, fast
-    (sub-second) integration check, not a mock.
+def test_contract_step_passes_for_a_healthy_candidate(tmp_path: Path) -> None:
+    """Real DVC integrity check + real predict_proba validation, no mocking --
+    but against a throwaway tmp_path git+dvc repo, not the real production
+    eval set. The real eval set is DVC-tracked and gitignored (only its .dvc
+    pointer is git-committed); it lives in a machine-local DVC remote and is
+    never present on a CI runner, so a test depending on it would pass
+    locally and fail in CI. `ContractStep.__init__`'s `eval_set_path` default
+    exists for exactly this test-injection reason -- production code (via
+    `build_promotion_gate()`) never overrides it.
     """
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
-    step = ContractStep()
+    step = ContractStep(eval_set_path=eval_file)
 
     result = step.handle(GateContext(candidate=artifact, production=None, eval_rows=rows))
 
