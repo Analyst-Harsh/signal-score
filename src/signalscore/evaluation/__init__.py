@@ -13,4 +13,19 @@ the prior production model to a non-production tag) via `registry.py`; on a
 fail, the candidate stays "staging" or is marked "rejected". See
 docs/signalscore-design.md, the promotion gate section, for the full rule
 set.
+
+Modules:
+    gate.py      Chain-of-Responsibility GateStep/GateContext/GateResult +
+                 build_promotion_gate() -- the fixed unit_tests -> contract ->
+                 margin chain.
+    contract.py  Step 2 check logic: schema/probability/NaN/latency, plus the
+                 DVC eval-set integrity check against the frozen `eval-set-v1`
+                 tag.
+    margin.py    Step 3 check logic: bootstrap-CI PR-AUC win + minority-F1/
+                 Brier non-regression floors, head-to-head on the frozen eval
+                 set.
+
+This package is pure gate-decision logic, decoupled from `registry.py` --
+loading candidate/production models and flipping MLflow tags is `run_gate.py`
+(not yet built).
 """
