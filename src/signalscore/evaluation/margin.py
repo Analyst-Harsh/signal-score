@@ -102,10 +102,15 @@ def _bootstrap_pr_auc_ci_lower(
     return float(np.percentile(deltas, _CI_PERCENTILE_LOWER))
 
 
-def evaluate_margin(ctx: GateContext) -> str | None:
+def evaluate_margin(ctx: GateContext, n_bootstrap: int = N_BOOTSTRAP) -> str | None:
     """None (pass) if `ctx.production` is None (trivial pass -- see
     `gate.MarginStep`) or if all three checks pass; otherwise a failure
     string identifying which check(s) failed and by how much.
+
+    `n_bootstrap` defaults to the real production `N_BOOTSTRAP` (1000) --
+    it's a parameter only so tests can pass a smaller value (200 is already
+    proven sufficient by `test_bootstrap_pr_auc_ci_lower_is_*`) to cut
+    per-test bootstrap cost. `gate.py`/`run_gate.py` never override it.
     """
     if ctx.production is None:
         return None
@@ -127,7 +132,12 @@ def evaluate_margin(ctx: GateContext) -> str | None:
     failures: list[str] = []
 
     ci_lower = _bootstrap_pr_auc_ci_lower(
-        y_true, proba_candidate, classes_candidate, proba_production, classes_production
+        y_true,
+        proba_candidate,
+        classes_candidate,
+        proba_production,
+        classes_production,
+        n_bootstrap=n_bootstrap,
     )
     if ci_lower <= 0:
         failures.append(

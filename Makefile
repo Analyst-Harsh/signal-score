@@ -17,6 +17,6 @@ typecheck:
 	uv run pyright
 
 test:
-	uv run pytest --cov=signalscore --cov-report=term-missing
+	uv run pytest -n auto --cov=signalscore --cov-report=term-missing
 
 check: lint format-check typecheck test

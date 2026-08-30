@@ -34,6 +34,7 @@ serving = [
 dev = [
     "pytest>=8",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",
     "ruff>=0.9",
     "pyright>=1.1",
     "lefthook>=1.9",
@@ -46,6 +47,9 @@ packages = ["src/signalscore"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "slow: real subprocess/dvc/mlflow integration tests, excluded via `pytest -m \"not slow\"` for a fast local loop; still run by `make check`/CI",
+]
 
 [tool.coverage.run]
 source = ["src/signalscore"]

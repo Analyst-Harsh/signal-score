@@ -7,6 +7,7 @@ three test files since all three need the same tiny BaselineArtifact/
 FeatureRow scaffolding.
 """
 
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -89,7 +90,12 @@ def init_frozen_git_dvc_repo(tmp_path: Path, content: str = "hello v1") -> Path:
     eval_file.write_text(content)
 
     def run(*args: str) -> None:
-        subprocess.run(args, cwd=tmp_path, check=True, capture_output=True, text=True)  # noqa: S603
+        # DVC_NO_ANALYTICS skips DVC's telemetry ping, which otherwise
+        # dominates `dvc init`/`dvc add`'s wall-clock cost in tests.
+        env = {**os.environ, "DVC_NO_ANALYTICS": "1"}
+        subprocess.run(  # noqa: S603
+            args, cwd=tmp_path, check=True, capture_output=True, text=True, env=env
+        )
 
     run("git", "init", "-q")
     run("git", "config", "user.email", "test@example.com")

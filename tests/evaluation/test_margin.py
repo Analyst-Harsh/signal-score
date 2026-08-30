@@ -107,7 +107,7 @@ def test_evaluate_margin_passes_when_candidate_clearly_beats_production() -> Non
     production = _fixed_artifact(texts, true_labels, weak_proba)
     ctx = GateContext(candidate=candidate, production=production, eval_rows=rows)
 
-    assert evaluate_margin(ctx) is None
+    assert evaluate_margin(ctx, n_bootstrap=200) is None
 
 
 def test_evaluate_margin_fails_when_candidate_ties_production() -> None:
@@ -121,7 +121,7 @@ def test_evaluate_margin_fails_when_candidate_ties_production() -> None:
     production = _fixed_artifact(texts, true_labels, proba)
     ctx = GateContext(candidate=candidate, production=production, eval_rows=rows)
 
-    result = evaluate_margin(ctx)
+    result = evaluate_margin(ctx, n_bootstrap=200)
 
     assert result is not None
     assert "not significant" in result
@@ -142,7 +142,7 @@ def test_evaluate_margin_fails_on_minority_f1_regression() -> None:
     production = _fixed_artifact(texts, production_pred, proba)
     ctx = GateContext(candidate=candidate, production=production, eval_rows=rows)
 
-    result = evaluate_margin(ctx)
+    result = evaluate_margin(ctx, n_bootstrap=200)
 
     assert result is not None
     assert "minority_f1" in result
@@ -168,7 +168,7 @@ def test_evaluate_margin_fails_on_brier_regression() -> None:
     production = _fixed_artifact(texts, true_labels, production_proba)
     ctx = GateContext(candidate=candidate, production=production, eval_rows=rows)
 
-    result = evaluate_margin(ctx)
+    result = evaluate_margin(ctx, n_bootstrap=200)
 
     assert result is not None
     assert "brier_macro" in result
