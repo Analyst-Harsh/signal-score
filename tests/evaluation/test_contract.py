@@ -104,7 +104,9 @@ class _SlowModel:
 
     def predict_proba(self, x: SparseMatrix) -> NDArray[np.float64]:
         n_rows: int = x.shape[0]
-        time.sleep(3.0)
+        # Just above _MAX_PREDICT_LATENCY_SECONDS (2.0s) with enough margin to
+        # avoid flakiness on a loaded CI runner, without wasting extra time.
+        time.sleep(2.2)
         return np.tile(np.array([0.34, 0.33, 0.33]), (n_rows, 1))
 
 

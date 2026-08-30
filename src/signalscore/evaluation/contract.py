@@ -13,6 +13,7 @@ decision 2).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -85,6 +86,11 @@ def verify_eval_set_integrity(eval_set_path: Path, frozen_tag: str = FROZEN_EVAL
             timeout=_DVC_DIFF_TIMEOUT_SECONDS,
             check=True,
             cwd=eval_set_path.parent,
+            # Disable DVC's telemetry ping -- a reasonable default for an
+            # automated promotion-gate pipeline regardless of test speed, and
+            # merged onto (not replacing) the existing environment so PATH
+            # etc. still resolve.
+            env={**os.environ, "DVC_NO_ANALYTICS": "1"},
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         return f"could not verify eval set against frozen tag {frozen_tag}: {e}"

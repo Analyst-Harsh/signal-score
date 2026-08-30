@@ -147,6 +147,7 @@ def test_parse_args_requires_candidate_version() -> None:
     assert args.eval_set == contract.EVAL_SET_PATH
 
 
+@pytest.mark.slow
 def test_first_promotion_that_clears_the_floor_promotes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -174,6 +175,7 @@ def test_first_promotion_that_clears_the_floor_promotes(
     assert version_tags.get("eval_set_tag") == contract.FROZEN_EVAL_TAG
 
 
+@pytest.mark.slow
 def test_first_promotion_that_does_not_clear_the_floor_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -195,6 +197,7 @@ def test_first_promotion_that_does_not_clear_the_floor_is_rejected(
     assert tags.get("gate_result") == "fail"
 
 
+@pytest.mark.slow
 def test_second_candidate_beats_production_on_margin_and_is_promoted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -228,6 +231,7 @@ def test_second_candidate_beats_production_on_margin_and_is_promoted(
     assert tags.get("gate_result") == "pass"
 
 
+@pytest.mark.slow
 def test_second_candidate_loses_on_margin_and_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
