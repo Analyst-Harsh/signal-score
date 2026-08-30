@@ -27,12 +27,20 @@ if TYPE_CHECKING:
     from signalscore.evaluation.gate import GateContext
 
 FROZEN_EVAL_TAG = "eval-set-v1"
+# Anchored to the repo root (derived from this file's own location), not a
+# bare relative path -- a relative path here would resolve against whatever
+# the invoking process's cwd happens to be (repo root when run via `make
+# check` from the top level, but not guaranteed for every test runner/IDE
+# invocation), and silently break `verify_eval_set_integrity`'s subprocess
+# `cwd=` with a confusing FileNotFoundError instead of a loud
+# misconfiguration signal.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 # The real frozen eval set this check verifies against in production. Kept as
 # a default parameter (not hardcoded inline) so tests can point
 # `check_model_contract`/`verify_eval_set_integrity` at a throwaway tmp_path
 # git+dvc repo instead -- same "thread the path as a parameter" convention
 # `train_baseline.py`/`registry.py` already use for exactly this reason.
-EVAL_SET_PATH = Path("data/processed/kubernetes-kubernetes/eval_set_v1.jsonl")
+EVAL_SET_PATH = _REPO_ROOT / "data/processed/kubernetes-kubernetes/eval_set_v1.jsonl"
 
 _DVC_DIFF_TIMEOUT_SECONDS = 30
 _MAX_PREDICT_LATENCY_SECONDS = 2.0

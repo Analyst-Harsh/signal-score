@@ -1,7 +1,6 @@
 """Tests for signalscore.evaluation.contract."""
 
 import json
-import subprocess
 import time
 from pathlib import Path
 from typing import cast
@@ -19,7 +18,7 @@ from signalscore.evaluation.contract import (
 )
 from signalscore.evaluation.gate import GateContext
 from signalscore.training.train_baseline import SparseMatrix
-from tests.evaluation._helpers import build_artifact, make_rows
+from tests.evaluation._helpers import build_artifact, init_frozen_git_dvc_repo, make_rows
 
 # --- _parse_dvc_diff_output: literal JSON fixtures, no subprocess ---------
 
@@ -57,39 +56,14 @@ def test_parse_dvc_diff_output_names_multiple_changed_keys() -> None:
 # --- verify_eval_set_integrity: real subprocess against a tmp_path repo ---
 
 
-def _init_frozen_git_dvc_repo(tmp_path: Path, content: str = "hello v1") -> Path:
-    """Builds a real tmp_path git+dvc repo: init both, write+track one file,
-    commit, tag it FROZEN_EVAL_TAG. Returns the tracked file's path. Matches
-    the plan's own guidance for testing this real-subprocess integration
-    without needing the actual multi-megabyte eval set or a real git tag.
-    """
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    eval_file = data_dir / "eval_set_v1.jsonl"
-    eval_file.write_text(content)
-
-    def run(*args: str) -> None:
-        subprocess.run(args, cwd=tmp_path, check=True, capture_output=True, text=True)  # noqa: S603
-
-    run("git", "init", "-q")
-    run("git", "config", "user.email", "test@example.com")
-    run("git", "config", "user.name", "Test")
-    run("dvc", "init", "-q")
-    run("dvc", "add", "-q", str(eval_file.relative_to(tmp_path)))
-    run("git", "add", "data/eval_set_v1.jsonl.dvc", "data/.gitignore")
-    run("git", "commit", "-q", "-m", "init")
-    run("git", "tag", FROZEN_EVAL_TAG)
-    return eval_file
-
-
 def test_verify_eval_set_integrity_returns_none_when_clean(tmp_path: Path) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
 
     assert verify_eval_set_integrity(eval_file) is None
 
 
 def test_verify_eval_set_integrity_reports_modification(tmp_path: Path) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     eval_file.write_text("hello v2 -- modified after freezing")
 
     result = verify_eval_set_integrity(eval_file)
@@ -100,7 +74,7 @@ def test_verify_eval_set_integrity_reports_modification(tmp_path: Path) -> None:
 
 
 def test_verify_eval_set_integrity_reports_missing_tag(tmp_path: Path) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
 
     result = verify_eval_set_integrity(eval_file, frozen_tag="no-such-tag")
 
@@ -111,7 +85,7 @@ def test_verify_eval_set_integrity_reports_missing_tag(tmp_path: Path) -> None:
 def test_verify_eval_set_integrity_reports_missing_dvc_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))  # a dir with no `dvc` executable
 
     result = verify_eval_set_integrity(eval_file)
@@ -145,7 +119,7 @@ class _InvalidProbaModel:
 
 
 def test_check_model_contract_passes_for_a_healthy_artifact(tmp_path: Path) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
     ctx = GateContext(candidate=artifact, production=None, eval_rows=rows)
@@ -156,7 +130,7 @@ def test_check_model_contract_passes_for_a_healthy_artifact(tmp_path: Path) -> N
 def test_check_model_contract_fails_when_eval_set_does_not_match_frozen_tag(
     tmp_path: Path,
 ) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     eval_file.write_text("modified after freezing")
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
@@ -169,7 +143,7 @@ def test_check_model_contract_fails_when_eval_set_does_not_match_frozen_tag(
 
 
 def test_check_model_contract_fails_on_latency_bound(tmp_path: Path) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
     artifact.model = cast(LogisticRegression, _SlowModel())
@@ -182,7 +156,7 @@ def test_check_model_contract_fails_on_latency_bound(tmp_path: Path) -> None:
 
 
 def test_check_model_contract_fails_on_invalid_probabilities(tmp_path: Path) -> None:
-    eval_file = _init_frozen_git_dvc_repo(tmp_path)
+    eval_file = init_frozen_git_dvc_repo(tmp_path)
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
     artifact.model = cast(LogisticRegression, _InvalidProbaModel())
