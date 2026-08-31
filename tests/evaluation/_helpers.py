@@ -15,13 +15,12 @@ from pathlib import Path
 from signalscore.evaluation.contract import FROZEN_EVAL_TAG
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
+from signalscore.training.strategies import get_strategy
 from signalscore.training.train_baseline import (
     BaselineArtifact,
     build_feature_matrix,
-    compute_feature_std,
     extract_labels,
     fit_vectorizers,
-    train_classifier,
 )
 
 CLASS_TEXTS = {
@@ -115,12 +114,13 @@ def build_artifact(rows: list[FeatureRow]) -> BaselineArtifact:
     vectorizers = fit_vectorizers([row.text for row in rows])
     x = build_feature_matrix(rows, vectorizers)
     y = extract_labels(rows)
-    model = train_classifier(x, y)
+    model, extra = get_strategy("logreg").train(x, y)
     classes = [str(c) for c in model.classes_]  # pyright: ignore
     return BaselineArtifact(
         word_vectorizer=vectorizers.word,
         char_vectorizer=vectorizers.char,
         model=model,
         classes=classes,
-        feature_std=compute_feature_std(x),
+        model_type="logreg",
+        extra=extra,
     )

@@ -1,24 +1,29 @@
-"""Feature weights and importance ratios for the baseline LogisticRegression.
+"""Feature weights and importance ratios for the baseline model -- multi-family:
+dispatches to whichever `TrainingStrategy` produced the artifact
+(signalscore.training.strategies).
 
 Run via:
     uv run python -m signalscore.training.feature_importance \\
         --model data/models/kubernetes-kubernetes/baseline_v0/model.joblib
 
-`LogisticRegression.coef_` (shape n_classes x n_features) already *is* the
-weight of every feature for every class; this module just names the columns
-and ranks them, reading the same coefficients four ways:
+For LogisticRegression, `coef_` (shape n_classes x n_features) already *is*
+the weight of every feature for every class; LogRegStrategy.feature_importance
+names the columns and ranks them, reading the same coefficients four ways:
 
 - weight: the raw coefficient (log-odds per unit of that feature).
 - odds_ratio: exp(weight) -- the standard interpretable form of a logistic
   coefficient ("this token roughly Nx's the odds of this class").
-- std_weight: weight * artifact.feature_std -- the standardized coefficient.
-  Raw weight is NOT comparable across columns: idf-weighted, row-L2-normalized
-  TF-IDF terms and the raw {0,1} is_member_plus column are on very different
-  scales, so a bigger raw weight doesn't mean a bigger real effect (see
-  train_baseline.compute_feature_std). std_weight corrects for that and is
-  what ranking and importance_ratio are actually based on.
+- std_weight: weight * artifact.extra["feature_std"] -- the standardized
+  coefficient. Raw weight is NOT comparable across columns: idf-weighted,
+  row-L2-normalized TF-IDF terms and the raw {0,1} is_member_plus column are
+  on very different scales, so a bigger raw weight doesn't mean a bigger real
+  effect.
 - importance_ratio: |std_weight| / sum(|std_weight|) for that class -- a 0..1
   figure that sums to 1, comparable to a tree model's feature_importances_.
+
+For XGBoost, there's no per-class native importance (multi:softprob doesn't
+expose one) -- XGBoostStrategy.feature_importance returns a single "overall"
+key instead of faking a per-class breakdown.
 """
 
 import argparse
@@ -27,47 +32,20 @@ from pathlib import Path
 from typing import Any
 
 import joblib
-import numpy as np
-from numpy.typing import NDArray
 
+# Re-exported for backward compat -- some callers still do
+# `from signalscore.training.feature_importance import combined_feature_names`.
+# The `as combined_feature_names` (not a bare import) is the standard
+# explicit-re-export idiom type checkers recognize as intentional.
+from signalscore.training.strategies import combined_feature_names as combined_feature_names
+from signalscore.training.strategies import get_strategy
 from signalscore.training.train_baseline import BaselineArtifact
-
-
-def combined_feature_names(artifact: BaselineArtifact) -> list[str]:
-    """Order matches build_feature_matrix: word cols, char cols, then is_member_plus."""
-    return [
-        *artifact.word_vectorizer.get_feature_names_out(),  # pyright: ignore
-        *artifact.char_vectorizer.get_feature_names_out(),  # pyright: ignore
-        "is_member_plus",
-    ]
 
 
 def top_features_by_class(
     artifact: BaselineArtifact, top_n: int = 25
 ) -> dict[str, list[dict[str, Any]]]:
-    """Per class: top_n features ranked by |std_weight|, each with weight, odds_ratio,
-    std_weight, and importance_ratio (see module docstring).
-    """
-    names = combined_feature_names(artifact)
-    coef = np.asarray(artifact.model.coef_, dtype=np.float64)  # pyright: ignore
-    std_coef = coef * artifact.feature_std
-    result: dict[str, list[dict[str, Any]]] = {}
-    for class_idx, class_name in enumerate(artifact.classes):
-        weights: NDArray[np.float64] = coef[class_idx]
-        std_weights: NDArray[np.float64] = std_coef[class_idx]
-        total_abs = float(np.abs(std_weights).sum())
-        ranked_idx = np.argsort(-np.abs(std_weights))[:top_n]
-        result[class_name] = [
-            {
-                "feature": names[i],
-                "weight": float(weights[i]),
-                "odds_ratio": float(np.exp(weights[i])),
-                "std_weight": float(std_weights[i]),
-                "importance_ratio": float(np.abs(std_weights[i])) / total_abs,
-            }
-            for i in ranked_idx
-        ]
-    return result
+    return get_strategy(artifact.model_type).feature_importance(artifact, top_n)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

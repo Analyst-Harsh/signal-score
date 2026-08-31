@@ -13,7 +13,7 @@ refit. Never reads eval_set_v1.jsonl or any test-split row.
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,6 @@ from scipy import sparse
 from sklearn.feature_extraction.text import (  # pyright: ignore[reportMissingTypeStubs]
     TfidfVectorizer,
 )
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (  # pyright: ignore[reportMissingTypeStubs]
     accuracy_score,  # pyright: ignore[reportUnknownVariableType]
     average_precision_score,  # pyright: ignore[reportUnknownVariableType]
@@ -43,6 +42,12 @@ from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
 from signalscore.registry import ModelRegistry
 from signalscore.settings import Settings
+from signalscore.training.strategies import (
+    DEFAULT_C,
+    DEFAULT_PENALTY,
+    TrainedModel,
+    get_strategy,
+)
 
 MODEL_VERSION = "baseline_v0"
 # Reused by registry/evaluation/serving later so the artifact filename lives
@@ -57,8 +62,6 @@ MODEL_ARTIFACT_FILENAME = "model.joblib"
 DEFAULT_WORD_NGRAM_RANGE: tuple[int, int] = (1, 2)
 DEFAULT_WORD_MIN_DF = 3
 DEFAULT_WORD_SUBLINEAR_TF = True
-DEFAULT_C = 1.0
-DEFAULT_PENALTY = "l2"
 
 # scipy ships no py.typed marker, so every sparse-matrix boundary is Unknown to
 # pyright -- isolate that behind one alias rather than fighting each variance.
@@ -124,71 +127,30 @@ def extract_labels(rows: list[FeatureRow]) -> NDArray[np.str_]:
     return np.array([row.label.value for row in rows])
 
 
-def compute_feature_std(x: SparseMatrix) -> NDArray[np.float64]:
-    """Per-column std of the design matrix -- the scale correction that makes
-    coef_ magnitudes comparable across columns on different scales (idf-weighted,
-    row-L2-normalized TF-IDF terms vs. the raw {0,1} is_member_plus column).
-    Computed via E[x^2] - E[x]^2 so it works directly on the sparse matrix.
-    """
-    mean = np.asarray(x.mean(axis=0)).ravel()  # pyright: ignore
-    mean_sq = np.asarray(x.multiply(x).mean(axis=0)).ravel()  # pyright: ignore
-    return np.sqrt(np.maximum(mean_sq - mean**2, 0.0))
-
-
-def train_classifier(
-    x_train: SparseMatrix,
-    y_train: NDArray[np.str_],
-    *,
-    C: float = DEFAULT_C,  # noqa: N803 -- matches sklearn's own LogisticRegression(C=...) name
-    penalty: str = DEFAULT_PENALTY,
-) -> LogisticRegression:
-    # max_iter raised from sklearn's default 100: with word+char TF-IDF (tens of
-    # thousands of columns) on ~7.7k rows, the default will very likely fail to
-    # converge. class_weight stays exactly as the locked spec states.
-    #
-    # lbfgs (sklearn's default solver) only supports the "l2" penalty; "l1"
-    # needs a different solver. liblinear is the usual first reach for l1, but
-    # this repo's installed sklearn (1.9.0) raises "the 'liblinear' solver does
-    # not support multiclass classification (n_classes >= 3)" for our 3-class
-    # problem -- saga supports l1 with native multinomial multiclass instead.
-    #
-    # sklearn 1.9 also deprecates the `penalty` kwarg itself (FutureWarning:
-    # removed in 1.10) in favor of always passing an explicit `l1_ratio` and
-    # leaving `penalty` unset -- l1_ratio=0 means what penalty="l2" used to
-    # mean, l1_ratio=1 means penalty="l1". Solver compatibility is unaffected:
-    # sklearn still derives the same internal penalty from l1_ratio and
-    # applies the same solver checks, so the l2/l1 <-> lbfgs/saga pairing
-    # above still has to hold. This project's own `penalty` parameter name
-    # (here, the CLI flag, tune_baseline.py's GRID) is unrelated to sklearn's
-    # deprecated kwarg and is untouched by this.
-    #
-    # random_state is fixed (not a tuning target, like class_weight): saga
-    # shuffles data stochastically, so two fits of the *same* config without a
-    # fixed seed can diverge -- a real problem when Experiment 2's sweep
-    # (tune_baseline.py) evaluates a config and a human then re-runs this CLI
-    # with the winning flags to produce the actual gated candidate. Both fits
-    # must produce the same model given the same config and data.
-    solver = "saga" if penalty == "l1" else "lbfgs"
-    l1_ratio = 1.0 if penalty == "l1" else 0.0
-    model = LogisticRegression(
-        class_weight="balanced",
-        max_iter=1000,
-        C=C,
-        l1_ratio=l1_ratio,
-        solver=solver,
-        random_state=42,
-    )
-    model.fit(x_train, y_train)  # pyright: ignore
-    return model
-
-
 @dataclass
 class BaselineArtifact:
     word_vectorizer: TfidfVectorizer
     char_vectorizer: TfidfVectorizer
-    model: LogisticRegression
+    model: TrainedModel
     classes: list[str]
-    feature_std: NDArray[np.float64]
+    model_type: str = "logreg"
+    extra: dict[str, Any] = field(default_factory=lambda: {})
+    # legacy field, backward-compat only -- see __setstate__
+    feature_std: NDArray[np.float64] | None = None
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        # Pickle restores dataclass instances via __dict__.update(), bypassing
+        # __init__ defaults entirely -- an already-pickled pre-refactor artifact's
+        # __dict__ has NO model_type/extra key at all, not "missing with the
+        # default applied". Backfill explicitly, or the currently-registered
+        # production baseline_v0 pickle becomes unloadable (AttributeError) the
+        # moment any code reads artifact.model_type.
+        state.setdefault("model_type", "logreg")
+        state.setdefault(
+            "extra",
+            {"feature_std": state["feature_std"]} if state.get("feature_std") is not None else {},
+        )
+        self.__dict__.update(state)
 
 
 # Training is always invoked as `python -m signalscore.training.train_baseline`
@@ -294,8 +256,8 @@ def train_and_evaluate(
     word_ngram_range: tuple[int, int] = DEFAULT_WORD_NGRAM_RANGE,
     word_min_df: int = DEFAULT_WORD_MIN_DF,
     word_sublinear_tf: bool = DEFAULT_WORD_SUBLINEAR_TF,
-    C: float = DEFAULT_C,  # noqa: N803 -- matches sklearn's own LogisticRegression(C=...) name
-    penalty: str = DEFAULT_PENALTY,
+    model_type: str = "logreg",
+    model_hyperparams: dict[str, Any] | None = None,
 ) -> tuple[BaselineArtifact, dict[str, Any]]:
     """Fit-on-train / evaluate-on-val core, with no disk or MLflow I/O -- the
     reusable entry point for both a single training run (`run_training_pipeline`)
@@ -313,11 +275,15 @@ def train_and_evaluate(
     y_train = extract_labels(train_rows)
     y_val = extract_labels(val_rows)
 
-    model = train_classifier(x_train, y_train, C=C, penalty=penalty)
+    strategy = get_strategy(model_type)
+    model, extra = strategy.train(
+        x_train, y_train, x_val=x_val, y_val=y_val, **(model_hyperparams or {})
+    )
     classes = [str(c) for c in model.classes_]  # pyright: ignore
 
-    y_pred: NDArray[np.str_] = model.predict(x_val)  # pyright: ignore
-    y_proba: NDArray[np.float64] = model.predict_proba(x_val)  # pyright: ignore
+    x_val_for_predict = strategy.transform_for_predict(x_val, extra)
+    y_pred: NDArray[np.str_] = model.predict(x_val_for_predict)  # pyright: ignore
+    y_proba: NDArray[np.float64] = model.predict_proba(x_val_for_predict)  # pyright: ignore
 
     metrics = compute_metrics(y_val, y_pred, y_proba, classes)  # pyright: ignore[reportUnknownArgumentType]
 
@@ -326,7 +292,8 @@ def train_and_evaluate(
         char_vectorizer=vectorizers.char,
         model=model,
         classes=classes,
-        feature_std=compute_feature_std(x_train),
+        model_type=model_type,
+        extra=extra,
     )
     return artifact, metrics
 
@@ -340,8 +307,8 @@ def run_training_pipeline(
     word_ngram_range: tuple[int, int] = DEFAULT_WORD_NGRAM_RANGE,
     word_min_df: int = DEFAULT_WORD_MIN_DF,
     word_sublinear_tf: bool = DEFAULT_WORD_SUBLINEAR_TF,
-    C: float = DEFAULT_C,  # noqa: N803 -- matches sklearn's own LogisticRegression(C=...) name
-    penalty: str = DEFAULT_PENALTY,
+    model_type: str = "logreg",
+    model_hyperparams: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     train_rows = load_feature_rows(train_path)
     val_rows = load_feature_rows(val_path)
@@ -352,8 +319,8 @@ def run_training_pipeline(
         word_ngram_range=word_ngram_range,
         word_min_df=word_min_df,
         word_sublinear_tf=word_sublinear_tf,
-        C=C,
-        penalty=penalty,
+        model_type=model_type,
+        model_hyperparams=model_hyperparams,
     )
 
     save_artifact(artifact, model_out)
@@ -369,10 +336,12 @@ def format_config_label(config: dict[str, Any]) -> str:
     never a static string, since hyperparameters are CLI-tunable.
     """
     lo, hi = config["word_ngram_range"]
+    model_type = config.get("model_type", "logreg")
+    hyperparams = config.get("model_hyperparams", {})
     return (
         f"{MODEL_VERSION}: tfidf(word {lo}-{hi} min_df={config['word_min_df']} "
         f"sublinear_tf={config['word_sublinear_tf']} + char_wb 3-5) + is_member_plus "
-        f"-> LogisticRegression(C={config['C']}, penalty={config['penalty']})"
+        f"-> {model_type}({hyperparams})"
     )
 
 
@@ -395,6 +364,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_WORD_SUBLINEAR_TF,
     )
+    parser.add_argument("--model-type", default="logreg", choices=["logreg", "xgboost"])
+    parser.add_argument("--model-hyperparams", type=json.loads, default="{}")
     parser.add_argument("--notes", default="")
     return parser.parse_args(argv)
 
@@ -406,12 +377,17 @@ def main(argv: list[str] | None = None) -> None:
     model_out = args.model_out or default_dir / MODEL_ARTIFACT_FILENAME
     metrics_out = args.metrics_out or default_dir / "metrics.json"
 
+    if args.model_type == "logreg":
+        model_hyperparams: dict[str, Any] = {"C": args.C, "penalty": args.penalty}
+    else:
+        model_hyperparams = args.model_hyperparams
+
     config: dict[str, Any] = {
         "word_ngram_range": (1, args.word_ngram_max),
         "word_min_df": args.word_min_df,
         "word_sublinear_tf": args.word_sublinear_tf,
-        "C": args.C,
-        "penalty": args.penalty,
+        "model_type": args.model_type,
+        "model_hyperparams": model_hyperparams,
     }
 
     train_rows = load_feature_rows(args.train)
@@ -432,14 +408,22 @@ def main(argv: list[str] | None = None) -> None:
                 "word_ngram_range": "{}-{}".format(*config["word_ngram_range"]),
                 "word_min_df": config["word_min_df"],
                 "word_sublinear_tf": config["word_sublinear_tf"],
-                "C": config["C"],
-                "penalty": config["penalty"],
                 "char_ngram_range": "3-5",
                 "char_min_df": 5,
                 "char_max_features": 300_000,
-                "classifier": "LogisticRegression",
-                "class_weight": "balanced",
-                "max_iter": 1000,
+                "classifier": config["model_type"],
+                # class_weight="balanced"/max_iter=1000 are LogisticRegression-specific
+                # fixed literals, not something XGBoost shares -- only logged when
+                # that's actually the family being trained.
+                **(
+                    {"class_weight": "balanced", "max_iter": 1000}
+                    if config["model_type"] == "logreg"
+                    else {}
+                ),
+                # Flattened, not the nested dict itself -- mlflow.log_params
+                # stringifies a nested dict into one opaque blob rather than
+                # per-key queryable params.
+                **{f"model_hyperparams.{k}": v for k, v in config["model_hyperparams"].items()},
                 # reproducibility: which library versions produced this artifact --
                 # joblib.load() is sensitive to exact minor-version mismatches, and
                 # mlflow.log_artifact() on a raw joblib dump (not mlflow.sklearn.log_model)

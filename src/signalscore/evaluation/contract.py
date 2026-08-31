@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from signalscore.training.train_baseline import FittedVectorizers, build_feature_matrix
+from signalscore.evaluation import margin
 
 if TYPE_CHECKING:
     from signalscore.evaluation.gate import GateContext
@@ -118,18 +118,13 @@ def check_model_contract(ctx: GateContext, eval_set_path: Path = EVAL_SET_PATH) 
         return "no eval rows available to check the model contract against"
 
     candidate = ctx.candidate
-    vectorizers = FittedVectorizers(word=candidate.word_vectorizer, char=candidate.char_vectorizer)
-    x = build_feature_matrix(rows, vectorizers)
 
     started = time.perf_counter()
-    proba = candidate.model.predict_proba(x)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    _, _, proba, _ = margin.score_artifact(candidate, rows)
     elapsed = time.perf_counter() - started
 
-    proba_arr: NDArray[np.float64] = np.asarray(  # pyright: ignore[reportUnknownVariableType]
-        proba,  # pyright: ignore[reportUnknownArgumentType]
-        dtype=np.float64,
-    )
-    actual_shape: tuple[int, int] = proba_arr.shape  # pyright: ignore[reportUnknownMemberType]
+    proba_arr: NDArray[np.float64] = np.asarray(proba, dtype=np.float64)
+    actual_shape: tuple[int, int] = proba_arr.shape
     expected_shape = (len(rows), len(candidate.classes))
     if actual_shape != expected_shape:
         return f"predict_proba shape {actual_shape} does not match expected {expected_shape}"

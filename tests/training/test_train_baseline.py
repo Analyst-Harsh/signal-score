@@ -26,11 +26,11 @@ from sklearn.preprocessing import (
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
 from signalscore.registry import DEFAULT_MODEL_NAME
+from signalscore.training.strategies import compute_feature_std, train_classifier
 from signalscore.training.train_baseline import (
     BaselineArtifact,
     FittedVectorizers,
     build_feature_matrix,
-    compute_feature_std,
     compute_metrics,
     fit_vectorizers,
     format_config_label,
@@ -40,7 +40,6 @@ from signalscore.training.train_baseline import (
     parse_args,
     run_training_pipeline,
     train_and_evaluate,
-    train_classifier,
 )
 
 CLASS_TEXTS = {
@@ -405,17 +404,16 @@ def test_format_config_label_embeds_the_actual_hyperparameters_used() -> None:
     CLI-tunable -- the label must reflect whatever config produced it.
     """
     config = {
-        "C": 0.1,
-        "penalty": "l1",
         "word_ngram_range": (1, 1),
         "word_min_df": 5,
         "word_sublinear_tf": False,
+        "model_type": "logreg",
+        "model_hyperparams": {"C": 0.1, "penalty": "l1"},
     }
 
     label = format_config_label(config)
 
-    assert "C=0.1" in label
-    assert "penalty=l1" in label
+    assert "logreg({'C': 0.1, 'penalty': 'l1'})" in label
     assert "1-1" in label
     assert "min_df=5" in label
     assert "sublinear_tf=False" in label
@@ -554,7 +552,7 @@ def test_main_registers_staging_candidate_with_params_and_metrics_logged(
     run = client.get_run(version.run_id)  # pyright: ignore[reportUnknownMemberType]
     params: dict[str, str] = run.data.params  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     assert params["model_version"] == "baseline_v0"
-    assert params["classifier"] == "LogisticRegression"
+    assert params["classifier"] == "logreg"
     assert params["class_weight"] == "balanced"
     assert int(params["train_row_count"]) == len(train_rows)
     assert int(params["val_row_count"]) == len(val_rows)
@@ -616,8 +614,8 @@ def test_main_logs_hyperparameter_overrides_not_the_defaults(
     run = client.get_run(run_id)  # pyright: ignore[reportUnknownMemberType]
     params: dict[str, str] = run.data.params  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    assert params["C"] == "0.1"
-    assert params["penalty"] == "l1"
+    assert params["model_hyperparams.C"] == "0.1"
+    assert params["model_hyperparams.penalty"] == "l1"
     assert params["word_ngram_range"] == "1-1"
     assert params["word_min_df"] == "1"
     assert params["word_sublinear_tf"] == "False"
