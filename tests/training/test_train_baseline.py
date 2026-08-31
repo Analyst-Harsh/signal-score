@@ -33,11 +33,14 @@ from signalscore.training.train_baseline import (
     compute_feature_std,
     compute_metrics,
     fit_vectorizers,
+    format_config_label,
     format_experiments_row,
     load_feature_rows,
     main,
     parse_args,
     run_training_pipeline,
+    train_and_evaluate,
+    train_classifier,
 )
 
 CLASS_TEXTS = {
@@ -118,6 +121,38 @@ def test_fit_vectorizers_builds_vocabulary_from_given_texts_only() -> None:
     assert held_out_text not in train_texts
 
 
+def test_fit_vectorizers_default_kwargs_reproduce_locked_spec_config() -> None:
+    """Regression guard for Experiment 2 (docs/candidate_models/overview.md):
+    calling fit_vectorizers with no overrides must still produce the exact
+    locked-spec config -- word (1,2)/min_df=3/sublinear_tf=True, char_wb
+    (3,5)/min_df=5/max_features=300_000/sublinear_tf=True.
+    """
+    vectorizers = fit_vectorizers([f"pod crash cluster variant {i}" for i in range(6)])
+
+    assert vectorizers.word.ngram_range == (1, 2)  # pyright: ignore
+    assert vectorizers.word.min_df == 3  # pyright: ignore
+    assert vectorizers.word.sublinear_tf is True  # pyright: ignore
+    assert vectorizers.char.ngram_range == (3, 5)  # pyright: ignore
+    assert vectorizers.char.min_df == 5  # pyright: ignore
+    assert vectorizers.char.max_features == 300_000  # pyright: ignore
+    assert vectorizers.char.sublinear_tf is True  # pyright: ignore
+
+
+def test_fit_vectorizers_word_kwargs_are_overridable() -> None:
+    vectorizers = fit_vectorizers(
+        [f"pod crash cluster variant {i}" for i in range(6)],
+        word_ngram_range=(1, 1),
+        word_min_df=1,
+        word_sublinear_tf=False,
+    )
+
+    assert vectorizers.word.ngram_range == (1, 1)  # pyright: ignore
+    assert vectorizers.word.min_df == 1  # pyright: ignore
+    assert vectorizers.word.sublinear_tf is False  # pyright: ignore
+    # char vectorizer is never tunable, even when word kwargs change.
+    assert vectorizers.char.ngram_range == (3, 5)  # pyright: ignore
+
+
 def test_build_feature_matrix_transforms_val_without_refitting() -> None:
     train_rows = make_rows(n_per_class=6)
     vectorizers = fit_vectorizers([row.text for row in train_rows])
@@ -156,6 +191,64 @@ def test_compute_feature_std_matches_numpy_column_std_on_a_dense_equivalent() ->
     # come out as std 0, not blow up or go slightly negative under sqrt.
     assert std == pytest.approx(dense.std(axis=0, ddof=0))
     assert std[2] == pytest.approx(0.0)
+
+
+def test_train_classifier_default_kwargs_reproduce_locked_spec_config() -> None:
+    """Regression guard: no overrides must still produce today's exact
+    LogisticRegression config (C=1.0, l1_ratio=0.0 i.e. "l2", solver="lbfgs").
+    `penalty` itself is deprecated in sklearn 1.9+ (removed in 1.10) and is
+    never passed to the constructor anymore -- l1_ratio is the real signal.
+    """
+    train_rows = make_rows(n_per_class=6)
+    vectorizers = fit_vectorizers([row.text for row in train_rows])
+    x_train = build_feature_matrix(train_rows, vectorizers)
+    y_train = np.array([row.label.value for row in train_rows])
+
+    model = train_classifier(x_train, y_train)
+
+    assert pytest.approx(1.0) == model.C  # pyright: ignore
+    assert pytest.approx(0.0) == model.l1_ratio  # pyright: ignore
+    assert model.solver == "lbfgs"  # pyright: ignore
+    assert model.class_weight == "balanced"  # pyright: ignore
+
+
+def test_train_classifier_l1_penalty_selects_a_compatible_solver() -> None:
+    """lbfgs (the default solver) only supports l1_ratio=0 ("l2") -- "l1"
+    must switch to a solver that actually supports this 3-class problem
+    rather than raising at fit time (liblinear does not: "does not support
+    multiclass classification (n_classes >= 3)" on this repo's installed
+    sklearn).
+    """
+    train_rows = make_rows(n_per_class=6)
+    vectorizers = fit_vectorizers([row.text for row in train_rows])
+    x_train = build_feature_matrix(train_rows, vectorizers)
+    y_train = np.array([row.label.value for row in train_rows])
+
+    model = train_classifier(x_train, y_train, penalty="l1")
+
+    assert pytest.approx(1.0) == model.l1_ratio  # pyright: ignore
+    assert model.solver == "saga"  # pyright: ignore
+    model.predict(x_train)  # pyright: ignore -- fit actually succeeded on 3 classes
+
+
+def test_train_classifier_is_deterministic_across_separate_calls() -> None:
+    """Regression guard for Experiment 2's two-step flow: tune_baseline.py
+    evaluates a config once, then a human re-runs train_baseline.py's CLI
+    separately with the winning flags. Those two independent fits of the
+    SAME config must produce identical predictions -- saga (the l1 solver)
+    shuffles data stochastically, so without a fixed random_state the second
+    fit could silently diverge from the config the sweep actually measured.
+    """
+    train_rows = make_rows(n_per_class=6)
+    vectorizers = fit_vectorizers([row.text for row in train_rows])
+    x_train = build_feature_matrix(train_rows, vectorizers)
+    y_train = np.array([row.label.value for row in train_rows])
+
+    first = train_classifier(x_train, y_train, penalty="l1")
+    second = train_classifier(x_train, y_train, penalty="l1")
+
+    assert (first.predict(x_train) == second.predict(x_train)).all()  # pyright: ignore
+    assert np.allclose(first.coef_, second.coef_)  # pyright: ignore
 
 
 def test_compute_metrics_on_a_hand_verified_tiny_case() -> None:
@@ -307,6 +400,75 @@ def test_run_training_pipeline_end_to_end_writes_artifacts(tmp_path: Path) -> No
         assert key in saved_metrics
 
 
+def test_format_config_label_embeds_the_actual_hyperparameters_used() -> None:
+    """Guards against a static description string once hyperparameters are
+    CLI-tunable -- the label must reflect whatever config produced it.
+    """
+    config = {
+        "C": 0.1,
+        "penalty": "l1",
+        "word_ngram_range": (1, 1),
+        "word_min_df": 5,
+        "word_sublinear_tf": False,
+    }
+
+    label = format_config_label(config)
+
+    assert "C=0.1" in label
+    assert "penalty=l1" in label
+    assert "1-1" in label
+    assert "min_df=5" in label
+    assert "sublinear_tf=False" in label
+
+
+def test_parse_args_accepts_hyperparameter_overrides() -> None:
+    args = parse_args(
+        [
+            "--train",
+            "a/train.jsonl",
+            "--val",
+            "a/val.jsonl",
+            "--C",
+            "0.5",
+            "--penalty",
+            "l1",
+            "--word-ngram-max",
+            "1",
+            "--word-min-df",
+            "7",
+            "--no-word-sublinear-tf",
+        ]
+    )
+
+    assert pytest.approx(0.5) == args.C
+    assert args.penalty == "l1"
+    assert args.word_ngram_max == 1
+    assert args.word_min_df == 7
+    assert args.word_sublinear_tf is False
+
+
+def test_run_training_pipeline_matches_train_and_evaluate_with_no_overrides(
+    tmp_path: Path,
+) -> None:
+    """Regression guard for the run_training_pipeline/train_and_evaluate split
+    (Experiment 2): the thin disk-I/O wrapper must produce byte-identical
+    metrics to calling the extracted pure core directly with defaults.
+    """
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
+
+    pipeline_metrics = run_training_pipeline(
+        train_path, val_path, tmp_path / "model.joblib", tmp_path / "metrics.json"
+    )
+    _, core_metrics = train_and_evaluate(train_rows, val_rows)
+
+    assert pipeline_metrics == core_metrics
+
+
 def test_main_cli_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     train_rows = make_rows(n_per_class=8)
     val_rows = make_rows(n_per_class=3, start_issue=1000)
@@ -403,6 +565,66 @@ def test_main_registers_staging_candidate_with_params_and_metrics_logged(
 
     experiment = client.get_experiment(run.info.experiment_id)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     assert experiment.name == "baseline_v0"  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_main_logs_hyperparameter_overrides_not_the_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Companion to the test above: when the CLI is invoked with overrides
+    (the second step of Experiment 2's sweep -> re-run flow), the logged
+    params must reflect those overrides, not the DEFAULT_* constants.
+    """
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
+
+    original_tracking_uri = mlflow.get_tracking_uri()  # pyright: ignore[reportUnknownMemberType]
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
+    try:
+        main(
+            [
+                "--train",
+                str(train_path),
+                "--val",
+                str(val_path),
+                "--model-out",
+                str(tmp_path / "model.joblib"),
+                "--metrics-out",
+                str(tmp_path / "metrics.json"),
+                "--C",
+                "0.1",
+                "--penalty",
+                "l1",
+                "--word-ngram-max",
+                "1",
+                "--word-min-df",
+                "1",
+                "--no-word-sublinear-tf",
+            ]
+        )
+    finally:
+        mlflow.set_tracking_uri(original_tracking_uri)  # pyright: ignore[reportUnknownMemberType]
+
+    client = MlflowClient(tracking_uri=tracking_uri)
+    versions = client.search_model_versions(f"name='{DEFAULT_MODEL_NAME}'")
+    run_id = versions[0].run_id
+    assert run_id is not None
+    run = client.get_run(run_id)  # pyright: ignore[reportUnknownMemberType]
+    params: dict[str, str] = run.data.params  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+    assert params["C"] == "0.1"
+    assert params["penalty"] == "l1"
+    assert params["word_ngram_range"] == "1-1"
+    assert params["word_min_df"] == "1"
+    assert params["word_sublinear_tf"] == "False"
+
+    artifact: BaselineArtifact = joblib.load(tmp_path / "model.joblib")  # pyright: ignore
+    assert pytest.approx(1.0) == artifact.model.l1_ratio  # pyright: ignore
+    assert pytest.approx(0.1) == artifact.model.C  # pyright: ignore
 
 
 @pytest.mark.slow

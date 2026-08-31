@@ -55,20 +55,22 @@ promotion gate, every result logged in `EXPERIMENTS.md`:
 1. **LogReg + TF-IDF + the 11 already-declared-but-unused diagnostics.** Pure feature-source
    delta vs. current production. Zero new dependencies, zero contract change, zero latency
    risk — the cheapest possible real head-to-head the gate has ever run.
-2. **Hyperparameter sweep on the winner of (1), including a feature-necessity check.** Tuned
-   on the existing train→val split directly — no k-fold CV needed, since the project already
-   has a purpose-built val split reserved for exactly this, consistent with
-   `train_baseline.py`'s existing fit-on-train/transform-on-val discipline. Sweep `C`,
-   `min_df`, `max_features`, `sublinear_tf`, ngram ranges, and `penalty` (L1/elasticnet vs.
-   L2) — L1 drives unhelpful feature weights toward zero, doubling as a feature-necessity
-   check on the small, interpretable set of 11 diagnostics from step 1 (using the
-   scale-corrected coefficient comparison `train_baseline.py:compute_feature_std` already
-   provides). Drop any diagnostics that are consistently near-zero before step 3. Gate the
-   single best config.
-3. **XGBoost on the same (dense) feature set** used by the winner of (1)/(2) — the surviving
-   diagnostics + `is_member_plus`, optionally with SVD-compressed TF-IDF rather than raw
-   sparse n-grams. Pure model-family delta, isolates whether non-linearity/interactions help
-   at all on this data.
+2. **Hyperparameter sweep on the current production feature set.** The 11 diagnostics are
+   excluded entirely — step 1's real gate result already rejected them as a block, and that
+   result is treated as conclusive, not reopened via a per-feature necessity check. Tuned on
+   exactly the TF-IDF(word) + TF-IDF(char) + `is_member_plus` -> `LogisticRegression` feature
+   set, on the existing train→val split directly — no k-fold CV needed, since the project
+   already has a purpose-built val split reserved for exactly this, consistent with
+   `train_baseline.py`'s existing fit-on-train/transform-on-val discipline. Sweeps `C`,
+   `penalty` (L1 vs. L2), word n-gram range, word `min_df`, and word `sublinear_tf` — the char
+   vectorizer stays fixed at its locked-spec values to keep the grid tractable. The sweep
+   (`tune_baseline.py`) is search-only — it never saves a model or touches the registry;
+   it prints a ranked trial table and the exact `train_baseline.py` command that reproduces
+   the winning config as the one real, gated candidate. Gate that candidate.
+3. **XGBoost on the tuned winner of (2)'s feature set** — `is_member_plus` plus a dense
+   representation of the TF-IDF text signal (e.g. SVD-compressed) rather than raw sparse
+   n-grams, since XGBoost is a weak matchup for trees on 100k+ sparse columns. Pure
+   model-family delta, isolates whether non-linearity/interactions help at all on this data.
 4. **BGE embeddings — only after (1)-(3)** establish an honest, tuned, best-available
    classical baseline. Budgeted as its own infrastructure change (new dependency extra,
    pinned model revision, startup warm-load, an explicit latency assertion in the contract
