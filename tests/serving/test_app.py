@@ -18,9 +18,37 @@ from mlflow.tracking import MlflowClient
 
 from signalscore.features.labels import Priority
 from signalscore.registry import DEFAULT_MODEL_NAME, ModelRegistry
-from signalscore.serving.app import app
+from signalscore.serving.app import (
+    ScoreRequest,
+    _to_feature_row,  # pyright: ignore[reportPrivateUsage]
+    app,
+)
 from signalscore.training.train_baseline import MODEL_ARTIFACT_FILENAME, BaselineArtifact
 from tests.evaluation._helpers import build_artifact, make_rows
+
+
+def test_to_feature_row_goes_through_the_frozen_feature_contract() -> None:
+    """_to_feature_row must call build_features(), not hand-roll title+body
+    concatenation or the author_association -> is_member_plus mapping --
+    that's the whole point of the fix (see features/pipeline.py's own
+    docstring: "the frozen serving contract... so train/serve skew is
+    structurally impossible").
+    """
+    payload = ScoreRequest(
+        title="pod crash",
+        body="cluster panic",
+        author_association="MEMBER",
+    )
+
+    row = _to_feature_row(payload)
+
+    assert row.text == "pod crash\ncluster panic"
+    assert row.is_member_plus is True
+    assert row.title_chars == len("pod crash")
+    assert row.body_chars == len("cluster panic")
+
+    anonymous_row = _to_feature_row(ScoreRequest(title="t", body="b", author_association=None))
+    assert anonymous_row.is_member_plus is False
 
 
 def _register_and_promote_production(
@@ -65,8 +93,9 @@ def test_score_returns_prediction_when_production_model_exists(
             response = test_client.post(
                 "/score",
                 json={
-                    "text": "critical outage pod crash cluster panic urgent failure",
-                    "is_member_plus": True,
+                    "title": "critical outage",
+                    "body": "pod crash cluster panic urgent failure",
+                    "author_association": "MEMBER",
                 },
             )
     finally:

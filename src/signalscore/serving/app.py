@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from signalscore.evaluation.margin import score_artifact
 from signalscore.features.labels import Priority
+from signalscore.features.pipeline import build_features
 from signalscore.features.schema import FeatureRow
 from signalscore.registry import ModelRegistry
 from signalscore.settings import Settings
@@ -32,23 +33,24 @@ from signalscore.training.train_baseline import MODEL_ARTIFACT_FILENAME, Baselin
 
 logger = structlog.get_logger(__name__)
 
-# FeatureRow carries fields the baseline model's design matrix never reads
-# (see build_feature_matrix: only `text`/`is_member_plus` feed it) -- e.g.
-# `label`, which is the training target and makes no sense as scoring input.
-# This placeholder fills those unused-at-scoring-time fields so a single-row
-# FeatureRow can still be built to reuse score_artifact() unchanged, rather
-# than reimplementing its transform-and-predict logic here.
+# FeatureRow's `label` is the training target, not a real scoring input --
+# this placeholder fills it so a single-row FeatureRow can still be built to
+# reuse score_artifact() unchanged, rather than reimplementing its
+# transform-and-predict logic here.
 _PLACEHOLDER_LABEL = Priority.P2_BACKLOG
 
 
 class ScoreRequest(BaseModel):
-    """Only the two fields the baseline model actually consumes at scoring
-    time -- not the full FeatureRow shape, which also carries fields (the
-    split key, and `label`, the training target) that aren't real inputs.
+    """Raw GitHub issue fields, not the assembled FeatureRow shape -- title/
+    body/author_association go through the same `build_features()` frozen
+    serving contract training used, so train/serve skew (e.g. a caller
+    hand-concatenating title+body differently than `extract_text_features`
+    does) is structurally impossible rather than left to the caller.
     """
 
-    text: str
-    is_member_plus: bool
+    title: str
+    body: str
+    author_association: str | None = None
 
 
 class ScoreResponse(BaseModel):
@@ -58,23 +60,14 @@ class ScoreResponse(BaseModel):
 
 
 def _to_feature_row(payload: ScoreRequest) -> FeatureRow:
+    bundle = build_features(payload.title, payload.body, payload.author_association)
     return FeatureRow(
         issue_number=0,
         created_at=datetime.now(UTC),
         label=_PLACEHOLDER_LABEL,
-        text=payload.text,
-        is_member_plus=payload.is_member_plus,
-        title_chars=0,
-        body_chars=0,
-        body_words=0,
-        has_code_block=False,
-        has_stack_trace=False,
-        has_url=False,
-        has_logline=False,
-        has_excl=False,
-        code_ratio=0.0,
-        any_lex=False,
-        is_ci_flake_shaped=False,
+        text=bundle["text"],
+        is_member_plus=bundle["is_member_plus"],
+        **bundle["diagnostics"],
     )
 
 
