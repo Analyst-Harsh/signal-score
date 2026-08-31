@@ -256,6 +256,7 @@ def main(argv: list[str] | None = None) -> None:
     val_rows = load_feature_rows(args.val)
 
     mlflow.set_tracking_uri(Settings().mlflow_tracking_uri)  # pyright: ignore[reportUnknownMemberType]
+    mlflow.set_experiment(MODEL_VERSION)  # pyright: ignore[reportUnknownMemberType]
     with mlflow.start_run(  # pyright: ignore[reportUnknownMemberType]
         run_name=f"{MODEL_VERSION}-{datetime.now(UTC):%Y%m%dT%H%M%S}"
     ) as run:

@@ -398,6 +398,9 @@ def test_main_registers_staging_candidate_with_params_and_metrics_logged(
     assert "macro_f1" in run_metrics
     assert "per_class_f1" not in run_metrics
 
+    experiment = client.get_experiment(run.info.experiment_id)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    assert experiment.name == "baseline_v0"  # pyright: ignore[reportUnknownMemberType]
+
 
 def test_parse_args_accepts_explicit_train_and_val_paths() -> None:
     args = parse_args(["--train", "a/train.jsonl", "--val", "a/val.jsonl"])
