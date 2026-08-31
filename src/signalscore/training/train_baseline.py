@@ -12,6 +12,7 @@ refit. Never reads eval_set_v1.jsonl or any test-split row.
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -125,6 +126,26 @@ class BaselineArtifact:
     model: LogisticRegression
     classes: list[str]
     feature_std: NDArray[np.float64]
+
+
+# Training is always invoked as `python -m signalscore.training.train_baseline`
+# (see this module's own docstring), which makes Python set this module's
+# __name__ -- and therefore BaselineArtifact.__module__ -- to "__main__" at
+# joblib.dump() time. Any other process (the gate CLI, a fresh serving
+# process, tests) unpickling that file looks for BaselineArtifact on ITS OWN
+# __main__ and fails with AttributeError.
+#
+# Renaming __module__ alone isn't enough: pickle's save_global() re-imports
+# whatever module __module__ names to verify it holds the exact same class
+# object being pickled. Under a `-m` run this module was never registered in
+# sys.modules under its real dotted path, so that re-import would execute
+# the file a second time and mint a second, distinct BaselineArtifact class
+# -- pickle then (correctly) refuses, raising "not the same object as ...".
+# Aliasing sys.modules to the already-executing module object (not a fresh
+# import) keeps both the name AND the object identity correct.
+if BaselineArtifact.__module__ == "__main__":
+    BaselineArtifact.__module__ = "signalscore.training.train_baseline"
+    sys.modules.setdefault("signalscore.training.train_baseline", sys.modules["__main__"])
 
 
 def _per_class_f1(

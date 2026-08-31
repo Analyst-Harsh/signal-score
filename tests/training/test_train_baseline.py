@@ -1,6 +1,9 @@
 """Tests for signalscore.training.train_baseline."""
 
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -400,6 +403,54 @@ def test_main_registers_staging_candidate_with_params_and_metrics_logged(
 
     experiment = client.get_experiment(run.info.experiment_id)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     assert experiment.name == "baseline_v0"  # pyright: ignore[reportUnknownMemberType]
+
+
+@pytest.mark.slow
+def test_artifact_from_a_real_dash_m_invocation_is_loadable_in_another_process(
+    tmp_path: Path,
+) -> None:
+    """Regression test for a real bug: `python -m signalscore.training.train_baseline`
+    (the exact invocation this module's own docstring instructs) sets that
+    module's __name__ to "__main__", so BaselineArtifact.__module__ was
+    "__main__" at joblib.dump() time -- any OTHER process (the gate CLI, a
+    serving process, this test) unpickling the file looked for
+    BaselineArtifact on its own __main__ and raised AttributeError. Only a
+    real subprocess run via `-m` reproduces this; calling main() in-process
+    (as the sibling test above does) never hits it, since __main__ there is
+    always pytest's own entry point.
+    """
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
+    model_out = tmp_path / "model.joblib"
+
+    subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "signalscore.training.train_baseline",
+            "--train",
+            str(train_path),
+            "--val",
+            str(val_path),
+            "--model-out",
+            str(model_out),
+            "--metrics-out",
+            str(tmp_path / "metrics.json"),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "MLFLOW_TRACKING_URI": f"sqlite:///{tmp_path / 'mlflow.db'}"},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    artifact: BaselineArtifact = joblib.load(model_out)  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    assert isinstance(artifact, BaselineArtifact)
 
 
 def test_parse_args_accepts_explicit_train_and_val_paths() -> None:
