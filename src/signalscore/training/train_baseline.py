@@ -49,6 +49,17 @@ MODEL_VERSION = "baseline_v0"
 # in one place instead of as a repeated inline literal.
 MODEL_ARTIFACT_FILENAME = "model.joblib"
 
+# Locked v0 spec hyperparameter defaults (docs/v0-feature-selection.md). Named
+# here, not just inlined as keyword defaults below, so main()'s mlflow.log_params
+# call can log the values actually passed to training instead of a separately
+# maintained (and driftable) set of literals -- a single source of truth for
+# what "the default config" means, tunable per-call by tune_baseline.py.
+DEFAULT_WORD_NGRAM_RANGE: tuple[int, int] = (1, 2)
+DEFAULT_WORD_MIN_DF = 3
+DEFAULT_WORD_SUBLINEAR_TF = True
+DEFAULT_C = 1.0
+DEFAULT_PENALTY = "l2"
+
 # scipy ships no py.typed marker, so every sparse-matrix boundary is Unknown to
 # pyright -- isolate that behind one alias rather than fighting each variance.
 SparseMatrix = Any
@@ -65,12 +76,26 @@ class FittedVectorizers:
     char: TfidfVectorizer
 
 
-def fit_vectorizers(train_texts: list[str]) -> FittedVectorizers:
+def fit_vectorizers(
+    train_texts: list[str],
+    *,
+    word_ngram_range: tuple[int, int] = DEFAULT_WORD_NGRAM_RANGE,
+    word_min_df: int = DEFAULT_WORD_MIN_DF,
+    word_sublinear_tf: bool = DEFAULT_WORD_SUBLINEAR_TF,
+) -> FittedVectorizers:
     """Fits two fresh vectorizers on train-split text only, every call --
     never a module-global, per docs/design-patterns-guide.md's Singleton ban
     on fitted transformers.
+
+    Only the word vectorizer is tunable (Experiment 2, docs/candidate_models/
+    overview.md) -- the char_wb vectorizer stays at its locked spec values.
     """
-    word = TfidfVectorizer(ngram_range=(1, 2), min_df=3, sublinear_tf=True, strip_accents="unicode")
+    word = TfidfVectorizer(
+        ngram_range=word_ngram_range,
+        min_df=word_min_df,
+        sublinear_tf=word_sublinear_tf,
+        strip_accents="unicode",
+    )
     char = TfidfVectorizer(
         analyzer="char_wb", ngram_range=(3, 5), min_df=5, max_features=300_000, sublinear_tf=True
     )
@@ -110,11 +135,49 @@ def compute_feature_std(x: SparseMatrix) -> NDArray[np.float64]:
     return np.sqrt(np.maximum(mean_sq - mean**2, 0.0))
 
 
-def train_classifier(x_train: SparseMatrix, y_train: NDArray[np.str_]) -> LogisticRegression:
+def train_classifier(
+    x_train: SparseMatrix,
+    y_train: NDArray[np.str_],
+    *,
+    C: float = DEFAULT_C,  # noqa: N803 -- matches sklearn's own LogisticRegression(C=...) name
+    penalty: str = DEFAULT_PENALTY,
+) -> LogisticRegression:
     # max_iter raised from sklearn's default 100: with word+char TF-IDF (tens of
     # thousands of columns) on ~7.7k rows, the default will very likely fail to
     # converge. class_weight stays exactly as the locked spec states.
-    model = LogisticRegression(class_weight="balanced", max_iter=1000)
+    #
+    # lbfgs (sklearn's default solver) only supports the "l2" penalty; "l1"
+    # needs a different solver. liblinear is the usual first reach for l1, but
+    # this repo's installed sklearn (1.9.0) raises "the 'liblinear' solver does
+    # not support multiclass classification (n_classes >= 3)" for our 3-class
+    # problem -- saga supports l1 with native multinomial multiclass instead.
+    #
+    # sklearn 1.9 also deprecates the `penalty` kwarg itself (FutureWarning:
+    # removed in 1.10) in favor of always passing an explicit `l1_ratio` and
+    # leaving `penalty` unset -- l1_ratio=0 means what penalty="l2" used to
+    # mean, l1_ratio=1 means penalty="l1". Solver compatibility is unaffected:
+    # sklearn still derives the same internal penalty from l1_ratio and
+    # applies the same solver checks, so the l2/l1 <-> lbfgs/saga pairing
+    # above still has to hold. This project's own `penalty` parameter name
+    # (here, the CLI flag, tune_baseline.py's GRID) is unrelated to sklearn's
+    # deprecated kwarg and is untouched by this.
+    #
+    # random_state is fixed (not a tuning target, like class_weight): saga
+    # shuffles data stochastically, so two fits of the *same* config without a
+    # fixed seed can diverge -- a real problem when Experiment 2's sweep
+    # (tune_baseline.py) evaluates a config and a human then re-runs this CLI
+    # with the winning flags to produce the actual gated candidate. Both fits
+    # must produce the same model given the same config and data.
+    solver = "saga" if penalty == "l1" else "lbfgs"
+    l1_ratio = 1.0 if penalty == "l1" else 0.0
+    model = LogisticRegression(
+        class_weight="balanced",
+        max_iter=1000,
+        C=C,
+        l1_ratio=l1_ratio,
+        solver=solver,
+        random_state=42,
+    )
     model.fit(x_train, y_train)  # pyright: ignore
     return model
 
@@ -224,19 +287,33 @@ def format_experiments_row(
     )
 
 
-def run_training_pipeline(
-    train_path: Path, val_path: Path, model_out: Path, metrics_out: Path
-) -> dict[str, Any]:
-    train_rows = load_feature_rows(train_path)
-    val_rows = load_feature_rows(val_path)
-
-    vectorizers = fit_vectorizers([row.text for row in train_rows])
+def train_and_evaluate(
+    train_rows: list[FeatureRow],
+    val_rows: list[FeatureRow],
+    *,
+    word_ngram_range: tuple[int, int] = DEFAULT_WORD_NGRAM_RANGE,
+    word_min_df: int = DEFAULT_WORD_MIN_DF,
+    word_sublinear_tf: bool = DEFAULT_WORD_SUBLINEAR_TF,
+    C: float = DEFAULT_C,  # noqa: N803 -- matches sklearn's own LogisticRegression(C=...) name
+    penalty: str = DEFAULT_PENALTY,
+) -> tuple[BaselineArtifact, dict[str, Any]]:
+    """Fit-on-train / evaluate-on-val core, with no disk or MLflow I/O -- the
+    reusable entry point for both a single training run (`run_training_pipeline`)
+    and a hyperparameter sweep (`tune_baseline.py`), which calls this in a loop
+    without reloading rows from disk each time.
+    """
+    vectorizers = fit_vectorizers(
+        [row.text for row in train_rows],
+        word_ngram_range=word_ngram_range,
+        word_min_df=word_min_df,
+        word_sublinear_tf=word_sublinear_tf,
+    )
     x_train = build_feature_matrix(train_rows, vectorizers)
     x_val = build_feature_matrix(val_rows, vectorizers)
     y_train = extract_labels(train_rows)
     y_val = extract_labels(val_rows)
 
-    model = train_classifier(x_train, y_train)
+    model = train_classifier(x_train, y_train, C=C, penalty=penalty)
     classes = [str(c) for c in model.classes_]  # pyright: ignore
 
     y_pred: NDArray[np.str_] = model.predict(x_val)  # pyright: ignore
@@ -251,9 +328,52 @@ def run_training_pipeline(
         classes=classes,
         feature_std=compute_feature_std(x_train),
     )
+    return artifact, metrics
+
+
+def run_training_pipeline(
+    train_path: Path,
+    val_path: Path,
+    model_out: Path,
+    metrics_out: Path,
+    *,
+    word_ngram_range: tuple[int, int] = DEFAULT_WORD_NGRAM_RANGE,
+    word_min_df: int = DEFAULT_WORD_MIN_DF,
+    word_sublinear_tf: bool = DEFAULT_WORD_SUBLINEAR_TF,
+    C: float = DEFAULT_C,  # noqa: N803 -- matches sklearn's own LogisticRegression(C=...) name
+    penalty: str = DEFAULT_PENALTY,
+) -> dict[str, Any]:
+    train_rows = load_feature_rows(train_path)
+    val_rows = load_feature_rows(val_path)
+
+    artifact, metrics = train_and_evaluate(
+        train_rows,
+        val_rows,
+        word_ngram_range=word_ngram_range,
+        word_min_df=word_min_df,
+        word_sublinear_tf=word_sublinear_tf,
+        C=C,
+        penalty=penalty,
+    )
+
     save_artifact(artifact, model_out)
     save_metrics(metrics, metrics_out)
     return metrics
+
+
+def format_config_label(config: dict[str, Any]) -> str:
+    """Renders a hyperparameter config (the kwargs accepted by
+    `train_and_evaluate`) as a human-readable model description -- for the
+    EXPERIMENTS.md row and, in `tune_baseline.py`, the sweep's trial table
+    and recommended next command. Built from the actual config every time,
+    never a static string, since hyperparameters are CLI-tunable.
+    """
+    lo, hi = config["word_ngram_range"]
+    return (
+        f"{MODEL_VERSION}: tfidf(word {lo}-{hi} min_df={config['word_min_df']} "
+        f"sublinear_tf={config['word_sublinear_tf']} + char_wb 3-5) + is_member_plus "
+        f"-> LogisticRegression(C={config['C']}, penalty={config['penalty']})"
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -262,6 +382,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--val", type=Path, required=True)
     parser.add_argument("--model-out", type=Path, default=None)
     parser.add_argument("--metrics-out", type=Path, default=None)
+    # Hyperparameter overrides for Experiment 2 (docs/candidate_models/overview.md):
+    # tune_baseline.py sweeps these locally and recommends a winning combination,
+    # then this same CLI is re-run with that combination to produce the one real,
+    # gated candidate -- tune_baseline.py itself never saves or registers a model.
+    parser.add_argument("--C", type=float, default=DEFAULT_C)
+    parser.add_argument("--penalty", choices=["l2", "l1"], default=DEFAULT_PENALTY)
+    parser.add_argument("--word-ngram-max", type=int, default=DEFAULT_WORD_NGRAM_RANGE[1])
+    parser.add_argument("--word-min-df", type=int, default=DEFAULT_WORD_MIN_DF)
+    parser.add_argument(
+        "--word-sublinear-tf",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_WORD_SUBLINEAR_TF,
+    )
     parser.add_argument("--notes", default="")
     return parser.parse_args(argv)
 
@@ -272,6 +405,14 @@ def main(argv: list[str] | None = None) -> None:
     default_dir = Path("data/models") / repo_dir_name / MODEL_VERSION
     model_out = args.model_out or default_dir / MODEL_ARTIFACT_FILENAME
     metrics_out = args.metrics_out or default_dir / "metrics.json"
+
+    config: dict[str, Any] = {
+        "word_ngram_range": (1, args.word_ngram_max),
+        "word_min_df": args.word_min_df,
+        "word_sublinear_tf": args.word_sublinear_tf,
+        "C": args.C,
+        "penalty": args.penalty,
+    }
 
     train_rows = load_feature_rows(args.train)
     val_rows = load_feature_rows(args.val)
@@ -284,8 +425,15 @@ def main(argv: list[str] | None = None) -> None:
         mlflow.log_params(  # pyright: ignore[reportUnknownMemberType]
             {
                 "model_version": MODEL_VERSION,
-                "word_ngram_range": "1-2",
-                "word_min_df": 3,
+                # Logs whatever config was actually used -- the CLI defaults
+                # (DEFAULT_*) when no flags are passed, or the caller's
+                # overrides otherwise. Never a separately hardcoded, driftable
+                # set of literals.
+                "word_ngram_range": "{}-{}".format(*config["word_ngram_range"]),
+                "word_min_df": config["word_min_df"],
+                "word_sublinear_tf": config["word_sublinear_tf"],
+                "C": config["C"],
+                "penalty": config["penalty"],
                 "char_ngram_range": "3-5",
                 "char_min_df": 5,
                 "char_max_features": 300_000,
@@ -305,7 +453,7 @@ def main(argv: list[str] | None = None) -> None:
                 "val_row_count": len(val_rows),
             }
         )
-        metrics = run_training_pipeline(args.train, args.val, model_out, metrics_out)
+        metrics = run_training_pipeline(args.train, args.val, model_out, metrics_out, **config)
         mlflow.log_metrics(  # pyright: ignore[reportUnknownMemberType]
             {k: v for k, v in metrics.items() if k != "per_class_f1"}
         )
@@ -317,9 +465,7 @@ def main(argv: list[str] | None = None) -> None:
 
     row = format_experiments_row(
         date=datetime.now(UTC).date().isoformat(),
-        model_config=(
-            f"{MODEL_VERSION}: tfidf(word 1-2 + char_wb 3-5) + is_member_plus -> LogisticRegression"
-        ),
+        model_config=format_config_label(config),
         dataset_snapshot=repo_dir_name,
         metrics=metrics,
         gate_result="n/a -- no promotion gate yet",
