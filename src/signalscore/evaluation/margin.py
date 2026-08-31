@@ -32,6 +32,7 @@ from sklearn.preprocessing import (
 )
 
 from signalscore.features.schema import FeatureRow
+from signalscore.training.strategies import get_strategy
 from signalscore.training.train_baseline import (
     BaselineArtifact,
     FittedVectorizers,
@@ -62,10 +63,11 @@ def score_artifact(
     """
     vectorizers = FittedVectorizers(word=artifact.word_vectorizer, char=artifact.char_vectorizer)
     x = build_feature_matrix(rows, vectorizers)
+    x = get_strategy(artifact.model_type).transform_for_predict(x, artifact.extra)
     y_true = extract_labels(rows)
     y_pred: NDArray[np.str_] = artifact.model.predict(x)  # pyright: ignore
     y_proba: NDArray[np.float64] = artifact.model.predict_proba(x)  # pyright: ignore
-    return y_true, y_pred, y_proba, artifact.classes  # pyright: ignore[reportUnknownVariableType]
+    return y_true, y_pred, y_proba, artifact.classes
 
 
 def _pr_auc_macro(

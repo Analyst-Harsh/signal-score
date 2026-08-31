@@ -62,18 +62,37 @@ class Trial:
     metrics: dict[str, Any]
 
 
-def iter_configs(*, budget: int | None = None, seed: int = 42) -> Iterator[dict[str, Any]]:
-    """Enumerates the search space -- the full 64-cell grid by default, or a
+def iter_configs(
+    grid: dict[str, list[Any]] = GRID, *, budget: int | None = None, seed: int = 42
+) -> Iterator[dict[str, Any]]:
+    """Enumerates the search space -- the full grid by default, or a
     fixed-budget random sample (sampling without replacement, since every
-    GRID value is a list) as a faster fallback if the full factorial proves
-    too slow in practice.
+    grid value is a list) as a faster fallback if the full factorial proves
+    too slow in practice. `grid` defaults to the module-level `GRID` (this
+    module's LogReg search space) but is a parameter so tune_xgboost.py can
+    reuse this exact sampling mechanics for its own grid.
     """
     if budget is None:
-        yield from ParameterGrid(GRID)  # pyright: ignore[reportUnknownVariableType]
+        yield from ParameterGrid(grid)  # pyright: ignore[reportUnknownVariableType]
     else:
         yield from ParameterSampler(  # pyright: ignore[reportUnknownVariableType]
-            GRID, n_iter=budget, random_state=seed
+            grid, n_iter=budget, random_state=seed
         )
+
+
+def _to_train_kwargs(config: dict[str, Any]) -> dict[str, Any]:
+    """Adapts a flat GRID-shaped config (C/penalty/word_* keys) to
+    train_and_evaluate's model_type/model_hyperparams kwarg shape -- GRID
+    itself, format_next_command, format_config_label, and select_winner all
+    keep operating on the original flat config; only the call into
+    train_and_evaluate needs translating.
+    """
+    word_keys = {"word_ngram_range", "word_min_df", "word_sublinear_tf"}
+    return {
+        **{k: v for k, v in config.items() if k in word_keys},
+        "model_type": "logreg",
+        "model_hyperparams": {k: v for k, v in config.items() if k not in word_keys},
+    }
 
 
 def select_winner(trials: list[Trial]) -> Trial:
@@ -134,7 +153,10 @@ def main(argv: list[str] | None = None) -> None:
     val_rows = load_feature_rows(args.val)
 
     trials: list[Trial] = [
-        Trial(config=config, metrics=train_and_evaluate(train_rows, val_rows, **config)[1])
+        Trial(
+            config=config,
+            metrics=train_and_evaluate(train_rows, val_rows, **_to_train_kwargs(config))[1],
+        )
         for config in iter_configs(budget=args.budget, seed=args.seed)
     ]
 

@@ -6,12 +6,9 @@ Brier cap -- can be exercised deterministically, per repo convention (see
 contract.py's `_SlowModel`/`_InvalidProbaModel` for the same pattern).
 """
 
-from typing import cast
-
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from sklearn.linear_model import LogisticRegression
 
 from signalscore.evaluation.gate import GateContext
 from signalscore.evaluation.margin import (
@@ -35,6 +32,7 @@ class _FixedModel:
     def __init__(self, y_pred: NDArray[np.str_], y_proba: NDArray[np.float64]) -> None:
         self._y_pred = y_pred
         self._y_proba = y_proba
+        self.classes_ = np.array(CLASSES)
 
     def predict(self, x: object) -> NDArray[np.str_]:
         del x
@@ -53,9 +51,10 @@ def _fixed_artifact(
     return BaselineArtifact(
         word_vectorizer=vectorizers.word,
         char_vectorizer=vectorizers.char,
-        model=cast(LogisticRegression, model),
+        model=model,
         classes=CLASSES,
-        feature_std=np.zeros(1),
+        model_type="logreg",
+        extra={"feature_std": np.zeros(1)},
     )
 
 

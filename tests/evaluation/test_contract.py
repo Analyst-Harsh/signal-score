@@ -3,12 +3,10 @@
 import json
 import time
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from sklearn.linear_model import LogisticRegression
 
 from signalscore.evaluation.contract import (
     FROZEN_EVAL_TAG,
@@ -99,8 +97,15 @@ def test_verify_eval_set_integrity_reports_missing_dvc_binary(
 
 class _SlowModel:
     """Real time.sleep()-based latency injection, not mocking, per repo
-    convention -- duck-types LogisticRegression's predict_proba surface.
+    convention -- duck-types the TrainedModel surface margin.score_artifact
+    calls (predict then predict_proba).
     """
+
+    classes_: NDArray[np.str_] = np.array(["P0_critical", "P1_soon", "P2_backlog"])
+
+    def predict(self, x: SparseMatrix) -> NDArray[np.str_]:
+        n_rows: int = x.shape[0]
+        return np.full(n_rows, "P0_critical")
 
     def predict_proba(self, x: SparseMatrix) -> NDArray[np.float64]:
         n_rows: int = x.shape[0]
@@ -114,6 +119,12 @@ class _InvalidProbaModel:
     """Returns out-of-range, non-normalized probabilities -- real object, no
     mocking -- to exercise check_model_contract's validity checks.
     """
+
+    classes_: NDArray[np.str_] = np.array(["P0_critical", "P1_soon", "P2_backlog"])
+
+    def predict(self, x: SparseMatrix) -> NDArray[np.str_]:
+        n_rows: int = x.shape[0]
+        return np.full(n_rows, "P0_critical")
 
     def predict_proba(self, x: SparseMatrix) -> NDArray[np.float64]:
         n_rows: int = x.shape[0]
@@ -148,7 +159,7 @@ def test_check_model_contract_fails_on_latency_bound(tmp_path: Path) -> None:
     eval_file = init_frozen_git_dvc_repo(tmp_path)
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
-    artifact.model = cast(LogisticRegression, _SlowModel())
+    artifact.model = _SlowModel()
     ctx = GateContext(candidate=artifact, production=None, eval_rows=rows)
 
     result = check_model_contract(ctx, eval_set_path=eval_file)
@@ -161,7 +172,7 @@ def test_check_model_contract_fails_on_invalid_probabilities(tmp_path: Path) -> 
     eval_file = init_frozen_git_dvc_repo(tmp_path)
     rows = make_rows(n_per_class=6)
     artifact = build_artifact(rows)
-    artifact.model = cast(LogisticRegression, _InvalidProbaModel())
+    artifact.model = _InvalidProbaModel()
     ctx = GateContext(candidate=artifact, production=None, eval_rows=rows)
 
     result = check_model_contract(ctx, eval_set_path=eval_file)

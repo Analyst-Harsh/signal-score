@@ -14,6 +14,8 @@ from signalscore.training.feature_importance import (
 from signalscore.training.train_baseline import BaselineArtifact, run_training_pipeline
 from tests.training.test_train_baseline import make_rows, write_rows
 
+XGBOOST_TEST_N_COMPONENTS = 5  # small corpus -- keeps TruncatedSVD's fit meaningful and fast
+
 
 def _fit_artifact(tmp_path: Path) -> BaselineArtifact:
     train_rows = make_rows(n_per_class=8)
@@ -72,7 +74,7 @@ def test_top_features_by_class_ranks_by_standardized_not_raw_weight(tmp_path: Pa
     # (e.g. a char 3-gram equal to a short word token) -- only check names that
     # unambiguously map back to a single column's std.
     unique_names = {name for name, count in Counter(names).items() if count == 1}
-    std_by_name = dict(zip(names, artifact.feature_std, strict=True))
+    std_by_name = dict(zip(names, artifact.extra["feature_std"], strict=True))
 
     for class_name in artifact.classes:
         rows = all_features[class_name]
@@ -84,3 +86,36 @@ def test_top_features_by_class_ranks_by_standardized_not_raw_weight(tmp_path: Pa
         # Ranked by |std_weight| descending -- not necessarily |weight| descending.
         std_weights = [abs(row["std_weight"]) for row in rows]
         assert std_weights == sorted(std_weights, reverse=True)
+
+
+def test_top_features_by_class_dispatches_to_xgboost_overall_key(tmp_path: Path) -> None:
+    """XGBoost has no native per-class importance (multi:softprob) -- the
+    dispatcher must route to XGBoostStrategy.feature_importance and return a
+    single "overall" key rather than one key per class.
+    """
+    train_rows = make_rows(n_per_class=8)
+    val_rows = make_rows(n_per_class=3, start_issue=1000)
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
+
+    model_out = tmp_path / "model.joblib"
+    run_training_pipeline(
+        train_path,
+        val_path,
+        model_out,
+        tmp_path / "metrics.json",
+        model_type="xgboost",
+        model_hyperparams={"n_components": XGBOOST_TEST_N_COMPONENTS},
+    )
+    artifact: BaselineArtifact = joblib.load(model_out)  # pyright: ignore
+
+    report = top_features_by_class(artifact, top_n=5)
+
+    assert set(report) == {"overall"}
+    assert report["overall"]
+    for entry in report["overall"]:
+        assert "feature" in entry
+        assert "importance" in entry
+        assert isinstance(entry["importance"], float)
