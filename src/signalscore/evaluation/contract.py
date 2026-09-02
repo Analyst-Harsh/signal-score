@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from signalscore.evaluation import margin
+from signalscore.features.embeddings import load_bge_model
 
 if TYPE_CHECKING:
     from signalscore.evaluation.gate import GateContext
@@ -119,8 +120,16 @@ def check_model_contract(ctx: GateContext, eval_set_path: Path = EVAL_SET_PATH) 
 
     candidate = ctx.candidate
 
+    # Warm-load the BGE model before starting the clock, matching how the
+    # serving process actually behaves (load once at boot, reuse per request)
+    # -- otherwise this bound would measure one-time cold model load latency,
+    # not the per-request inference cost it's meant to bound.
+    bge_model = None
+    if candidate.feature_source == "bge":
+        bge_model = load_bge_model(candidate.extra["revision_sha"])
+
     started = time.perf_counter()
-    _, _, proba, _ = margin.score_artifact(candidate, rows)
+    _, _, proba, _ = margin.score_artifact(candidate, rows, bge_model=bge_model)
     elapsed = time.perf_counter() - started
 
     proba_arr: NDArray[np.float64] = np.asarray(proba, dtype=np.float64)

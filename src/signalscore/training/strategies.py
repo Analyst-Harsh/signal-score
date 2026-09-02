@@ -1,6 +1,8 @@
 """TrainingStrategy seam -- one model family per class, dispatched by a plain
 dict (not a Factory class: docs/design-patterns-guide.md sets the Factory
-Method trigger at >=3 real variants; there are exactly 2 today).
+Method trigger at >=3 real variants, which this now crosses with 4 entries --
+but nothing here needs polymorphic *construction* (no per-type __init__ args
+to route), so the flat dict stays; decided, not re-litigated here).
 """
 
 from __future__ import annotations
@@ -138,9 +140,17 @@ def compute_feature_std(x: SparseMatrix) -> NDArray[np.float64]:
     coef_ magnitudes comparable across columns on different scales (idf-weighted,
     row-L2-normalized TF-IDF terms vs. the raw {0,1} is_member_plus column).
     Computed via E[x^2] - E[x]^2 so it works directly on the sparse matrix.
+
+    `x` is a scipy sparse matrix on the TF-IDF path and a plain dense ndarray
+    on the BGE path (LogRegStrategy is reused unchanged for "logreg_bge") --
+    sparse's elementwise square is `.multiply(x)` (`*` is matrix product for
+    sparse), while ndarray has no `.multiply` at all and `*` is already
+    elementwise. Branch on which surface `x` actually has, duck-typed like
+    the rest of this module's SparseMatrix = Any boundary.
     """
     mean = np.asarray(x.mean(axis=0)).ravel()  # pyright: ignore
-    mean_sq = np.asarray(x.multiply(x).mean(axis=0)).ravel()  # pyright: ignore
+    x_squared = x.multiply(x) if hasattr(x, "multiply") else x * x  # pyright: ignore
+    mean_sq = np.asarray(x_squared.mean(axis=0)).ravel()  # pyright: ignore
     return np.sqrt(np.maximum(mean_sq - mean**2, 0.0))
 
 
@@ -179,6 +189,15 @@ class LogRegStrategy:
           columns on different scales.
         - importance_ratio: |std_weight| / sum(|std_weight|) for that class.
         """
+        # BGE artifacts have word_vectorizer/char_vectorizer=None -- a raw
+        # embedding dimension has no vocabulary token to name. getattr default
+        # degrades gracefully until the sibling BaselineArtifact change (adding
+        # feature_source) lands.
+        if getattr(artifact, "feature_source", "tfidf") == "bge":
+            raise NotImplementedError(
+                "feature importance is not meaningful for BGE embeddings -- a "
+                "raw embedding dimension carries no interpretable name"
+            )
         names = combined_feature_names(artifact)
         coef = np.asarray(artifact.model.coef_, dtype=np.float64)  # pyright: ignore
         feature_std = artifact.extra["feature_std"]
@@ -250,6 +269,64 @@ class _XGBoostModel:
         return self._model.feature_importances_  # pyright: ignore
 
 
+def _prepare_xgb_fit_args(
+    y_train: NDArray[np.str_],
+    dense_val: NDArray[np.float64] | None,
+    y_val: NDArray[np.str_] | None,
+) -> tuple[NDArray[np.str_], NDArray[np.intp], dict[str, Any], int | None]:
+    """Balanced class weights + string<->int label encoding + eval_set wiring,
+    shared verbatim by XGBoostStrategy (SVD-reduced TF-IDF) and XGBoostBgeStrategy
+    (raw dense embeddings) -- everything below is representation-agnostic; only
+    how the caller gets `dense_val` (SVD-transform vs. identity) differs.
+
+    Returns (classes_arr, y_train_encoded, fit_kwargs, early_stopping_rounds).
+    `dense_val`/`y_val` should both be provided or both be None -- pass an
+    already-transformed val array (whatever "transformed" means for the caller's
+    strategy), not raw x_val.
+    """
+    # ONE class-weight mapping, derived from TRAIN's distribution only, applied
+    # to both splits. This mirrors exactly how class_weight="balanced" already
+    # works for LogisticRegression (computed once from whatever y is passed to
+    # .fit() -- train only; LR's .fit() has no eval-set concept at all).
+    # Computing "balanced" independently on val would give val a DIFFERENT
+    # mapping than train used (val's class proportions can differ from train's
+    # by sampling noise even under a stratified split), so the weighted
+    # mlogloss early stopping watches would no longer match what training is
+    # actually minimizing. Do NOT compute_sample_weight("balanced", y_val)
+    # independently -- this was flagged as a real bug in review.
+    classes_arr = np.unique(y_train)
+    class_weights = compute_class_weight(  # pyright: ignore[reportUnknownVariableType]
+        "balanced", classes=classes_arr, y=y_train
+    )
+    class_weight_map: dict[str, float] = dict(
+        zip(
+            classes_arr.tolist(),
+            class_weights.tolist(),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            strict=True,
+        )
+    )
+    sample_weight = compute_sample_weight(class_weight=class_weight_map, y=y_train)
+
+    # xgboost's sklearn API requires integer class labels (0..n_classes-1) --
+    # see _XGBoostModel's docstring. label_to_idx is built from classes_arr's
+    # sorted order so the encoded labels, and therefore predict_proba's
+    # column order, line up with classes_arr / artifact.classes exactly.
+    label_to_idx = {label: idx for idx, label in enumerate(classes_arr.tolist())}
+    y_train_encoded = np.array([label_to_idx[label] for label in y_train])
+
+    fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
+    early_stopping_rounds: int | None = None
+    if dense_val is not None and y_val is not None:
+        sample_weight_val = compute_sample_weight(class_weight=class_weight_map, y=y_val)
+        y_val_encoded = np.array([label_to_idx[label] for label in y_val])
+        fit_kwargs["eval_set"] = [(dense_val, y_val_encoded)]
+        fit_kwargs["sample_weight_eval_set"] = [sample_weight_val]
+        fit_kwargs["verbose"] = False
+        early_stopping_rounds = DEFAULT_EARLY_STOPPING_ROUNDS
+
+    return classes_arr, y_train_encoded, fit_kwargs, early_stopping_rounds
+
+
 class XGBoostStrategy:
     name: ClassVar[str] = "xgboost"
 
@@ -271,46 +348,12 @@ class XGBoostStrategy:
         dense_text_train: NDArray[np.float64] = reducer.fit_transform(text_train)  # pyright: ignore
         dense_train = np.hstack([dense_text_train, member_train.toarray()])  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
 
-        # ONE class-weight mapping, derived from TRAIN's distribution only, applied
-        # to both splits. This mirrors exactly how class_weight="balanced" already
-        # works for LogisticRegression (computed once from whatever y is passed to
-        # .fit() -- train only; LR's .fit() has no eval-set concept at all).
-        # Computing "balanced" independently on val would give val a DIFFERENT
-        # mapping than train used (val's class proportions can differ from train's
-        # by sampling noise even under a stratified split), so the weighted
-        # mlogloss early stopping watches would no longer match what training is
-        # actually minimizing. Do NOT compute_sample_weight("balanced", y_val)
-        # independently -- this was flagged as a real bug in review.
-        classes_arr = np.unique(y_train)
-        class_weights = compute_class_weight(  # pyright: ignore[reportUnknownVariableType]
-            "balanced", classes=classes_arr, y=y_train
-        )
-        class_weight_map: dict[str, float] = dict(
-            zip(
-                classes_arr.tolist(),
-                class_weights.tolist(),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                strict=True,
-            )
-        )
-        sample_weight = compute_sample_weight(class_weight=class_weight_map, y=y_train)
-
-        # xgboost's sklearn API requires integer class labels (0..n_classes-1) --
-        # see _XGBoostModel's docstring. label_to_idx is built from classes_arr's
-        # sorted order so the encoded labels, and therefore predict_proba's
-        # column order, line up with classes_arr / artifact.classes exactly.
-        label_to_idx = {label: idx for idx, label in enumerate(classes_arr.tolist())}
-        y_train_encoded = np.array([label_to_idx[label] for label in y_train])
-
-        fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
-        early_stopping_rounds: int | None = None
+        dense_val: NDArray[np.float64] | None = None
         if x_val is not None and y_val is not None:
             dense_val = _slice_and_densify(x_val, reducer)
-            sample_weight_val = compute_sample_weight(class_weight=class_weight_map, y=y_val)
-            y_val_encoded = np.array([label_to_idx[label] for label in y_val])
-            fit_kwargs["eval_set"] = [(dense_val, y_val_encoded)]
-            fit_kwargs["sample_weight_eval_set"] = [sample_weight_val]
-            fit_kwargs["verbose"] = False
-            early_stopping_rounds = DEFAULT_EARLY_STOPPING_ROUNDS
+        classes_arr, y_train_encoded, fit_kwargs, early_stopping_rounds = _prepare_xgb_fit_args(
+            y_train, dense_val, y_val
+        )
 
         model = XGBClassifier(
             objective="multi:softprob",
@@ -342,6 +385,57 @@ class XGBoostStrategy:
         }
 
 
+class XGBoostBgeStrategy:
+    """BGE embeddings arrive as a plain dense ndarray [384 embedding dims |
+    is_member_plus], not a scipy sparse TF-IDF matrix -- reusing XGBoostStrategy
+    would crash on `.toarray()` (see _slice_and_densify) and would pointlessly
+    SVD-compress an already-small, already-dense semantic space. No slicing,
+    no reducer: the full array goes straight into XGBClassifier.fit().
+    """
+
+    name: ClassVar[str] = "xgboost_bge"
+
+    def train(
+        self,
+        x_train: SparseMatrix,
+        y_train: NDArray[np.str_],
+        *,
+        x_val: SparseMatrix | None = None,
+        y_val: NDArray[np.str_] | None = None,
+        **hyperparams: Any,
+    ) -> tuple[TrainedModel, dict[str, Any]]:
+        dense_val = x_val if x_val is not None and y_val is not None else None
+        classes_arr, y_train_encoded, fit_kwargs, early_stopping_rounds = _prepare_xgb_fit_args(
+            y_train, dense_val, y_val
+        )
+
+        model = XGBClassifier(
+            objective="multi:softprob",
+            eval_metric="mlogloss",
+            n_estimators=hyperparams.pop("n_estimators", DEFAULT_N_ESTIMATORS),
+            early_stopping_rounds=early_stopping_rounds,
+            importance_type="gain",
+            tree_method="hist",
+            random_state=42,
+            **hyperparams,
+        )
+        model.fit(x_train, y_train_encoded, **fit_kwargs)  # pyright: ignore
+        return _XGBoostModel(model, classes_arr), {}
+
+    def transform_for_predict(self, x: SparseMatrix, extra: dict[str, Any]) -> SparseMatrix:
+        del extra
+        return x
+
+    def feature_importance(
+        self, artifact: BaselineArtifact, top_n: int
+    ) -> dict[str, list[dict[str, Any]]]:
+        del artifact, top_n
+        raise NotImplementedError(
+            "feature importance is not meaningful for BGE embeddings -- a raw "
+            "embedding dimension carries no interpretable name"
+        )
+
+
 # LogRegStrategy/XGBoostStrategy's `train` each narrow the Protocol's
 # **hyperparams: Any catch-all to their own real keyword args (C/penalty;
 # n_components) -- a safe narrowing for how this module actually calls them,
@@ -349,6 +443,8 @@ class XGBoostStrategy:
 STRATEGIES: dict[str, TrainingStrategy] = {
     "logreg": LogRegStrategy(),  # pyright: ignore[reportAssignmentType]
     "xgboost": XGBoostStrategy(),
+    "logreg_bge": LogRegStrategy(),  # pyright: ignore[reportAssignmentType]
+    "xgboost_bge": XGBoostBgeStrategy(),
 }
 
 
