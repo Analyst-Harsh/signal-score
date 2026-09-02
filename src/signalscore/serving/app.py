@@ -24,6 +24,14 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from signalscore.evaluation.margin import score_artifact
+
+# Must come after the margin import above: margin.py's own module-level
+# imports already force xgboost to load before sentence_transformers/torch
+# (see margin.py's comment) -- this line only re-finds the already-imported
+# module, but keeping it below margin's import (rather than letting isort
+# hoist it, which it wouldn't here since "evaluation" < "features"
+# alphabetically anyway) keeps that ordering guarantee visible and intact.
+from signalscore.features.embeddings import load_bge_model
 from signalscore.features.labels import Priority
 from signalscore.features.pipeline import build_features
 from signalscore.features.schema import FeatureRow
@@ -96,6 +104,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     artifact, model_version = _load_production_artifact()
     app.state.artifact = artifact
     app.state.model_version = model_version
+    if artifact.feature_source == "bge":
+        app.state.bge_model = load_bge_model(artifact.extra["revision_sha"])
     yield
 
 
@@ -107,7 +117,9 @@ def score(payload: ScoreRequest) -> ScoreResponse:
     started = time.perf_counter()
     row = _to_feature_row(payload)
     artifact: BaselineArtifact = app.state.artifact
-    _, y_pred, y_proba, classes = score_artifact(artifact, [row])
+    _, y_pred, y_proba, classes = score_artifact(
+        artifact, [row], bge_model=getattr(app.state, "bge_model", None)
+    )
     priority_class = str(y_pred[0])
     probabilities = {cls: float(p) for cls, p in zip(classes, y_proba[0], strict=True)}
     latency_ms = (time.perf_counter() - started) * 1000

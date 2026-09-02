@@ -29,6 +29,10 @@ serving = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "structlog>=24.1",
+    "sentence-transformers>=3.0",
+]
+embeddings = [
+    "sentence-transformers>=3.0",
 ]
 
 [dependency-groups]

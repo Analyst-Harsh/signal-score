@@ -1,5 +1,12 @@
 """Tests for signalscore.training.train_baseline."""
 
+# xgboost must be imported before sentence_transformers/torch in this process
+# -- see the matching comment in train_baseline.py for why (a real macOS
+# arm64 segfault, not lint noise). This test file imports SentenceTransformer
+# directly (for a couple of test type hints), which would otherwise pull in
+# torch before train_baseline.py's own ordering fix ever runs.
+import xgboost  # noqa: F401, I001 # pyright: ignore[reportUnusedImport]
+
 import json
 import os
 import subprocess
@@ -8,6 +15,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+# The pinned BGE revision is already cached locally on this machine (see
+# tests/features/test_embeddings.py) -- forcing offline mode skips the slow,
+# retry-heavy HTTP HEAD checks Hugging Face Hub otherwise makes on every load.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 import joblib
 import mlflow
 import numpy as np
@@ -15,6 +27,7 @@ import pytest
 from mlflow.tracking import MlflowClient
 from numpy.typing import NDArray
 from scipy import sparse
+from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingTypeStubs]
 from sklearn.metrics import (  # pyright: ignore[reportMissingTypeStubs]
     average_precision_score,  # pyright: ignore[reportUnknownVariableType]
     brier_score_loss,  # pyright: ignore[reportUnknownVariableType]
@@ -23,13 +36,19 @@ from sklearn.preprocessing import (
     label_binarize,  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
 )
 
+from signalscore.features.embeddings import (
+    BGE_MODEL_NAME,
+    BGE_REVISION_SHA,
+)
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
 from signalscore.registry import DEFAULT_MODEL_NAME
-from signalscore.training.strategies import compute_feature_std, train_classifier
+from signalscore.training import train_baseline as train_baseline_module
+from signalscore.training.strategies import compute_feature_std, get_strategy, train_classifier
 from signalscore.training.train_baseline import (
     BaselineArtifact,
     FittedVectorizers,
+    build_bge_feature_matrix,
     build_feature_matrix,
     compute_metrics,
     fit_vectorizers,
@@ -381,6 +400,8 @@ def test_run_training_pipeline_end_to_end_writes_artifacts(tmp_path: Path) -> No
 
     artifact = joblib.load(model_out)  # pyright: ignore
     assert isinstance(artifact, BaselineArtifact)
+    assert artifact.word_vectorizer is not None
+    assert artifact.char_vectorizer is not None
     vectorizers = FittedVectorizers(word=artifact.word_vectorizer, char=artifact.char_vectorizer)
     val_matrix = build_feature_matrix(val_rows, vectorizers)
     predictions = artifact.model.predict(val_matrix)  # pyright: ignore
@@ -680,3 +701,166 @@ def test_parse_args_accepts_explicit_train_and_val_paths() -> None:
     assert args.val == Path("a/val.jsonl")
     assert args.model_out is None
     assert args.metrics_out is None
+
+
+def test_baseline_artifact_defaults_feature_source_to_tfidf() -> None:
+    """Existing TF-IDF construction still works unchanged, and feature_source
+    defaults to "tfidf" when the caller doesn't pass it -- the field is new,
+    but every pre-existing call site (this repo's and any already-pickled
+    artifact) must keep working exactly as before.
+    """
+    train_rows = make_rows(n_per_class=6)
+    vectorizers = fit_vectorizers([row.text for row in train_rows])
+    x_train = build_feature_matrix(train_rows, vectorizers)
+    y_train = np.array([row.label.value for row in train_rows])
+    model, extra = get_strategy("logreg").train(x_train, y_train)
+
+    artifact = BaselineArtifact(
+        word_vectorizer=vectorizers.word,
+        char_vectorizer=vectorizers.char,
+        model=model,
+        classes=[str(c) for c in model.classes_],  # pyright: ignore
+        extra=extra,
+    )
+
+    assert artifact.feature_source == "tfidf"
+    assert artifact.word_vectorizer is vectorizers.word
+    assert artifact.char_vectorizer is vectorizers.char
+
+
+def test_build_bge_feature_matrix_shape() -> None:
+    rows = make_rows(n_per_class=3)
+    embeddings = np.random.default_rng(0).random((len(rows), 384))
+
+    matrix = build_bge_feature_matrix(rows, embeddings)
+
+    assert matrix.shape == (len(rows), 385)
+    assert matrix[0, -1] in (0.0, 1.0)
+
+
+def test_build_bge_feature_matrix_raises_on_row_count_mismatch() -> None:
+    rows = make_rows(n_per_class=3)
+    mismatched_embeddings = np.zeros((len(rows) - 1, 384))
+
+    with pytest.raises(ValueError, match="does not match"):
+        build_bge_feature_matrix(rows, mismatched_embeddings)
+
+
+def test_load_or_compute_bge_embeddings_computes_and_caches_on_first_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = make_rows(n_per_class=2)
+    jsonl_path = tmp_path / "train.jsonl"
+
+    call_count = 0
+
+    def fake_embed_texts(texts: list[str], _model: SentenceTransformer) -> NDArray[np.float64]:
+        nonlocal call_count
+        call_count += 1
+        return np.full((len(texts), 384), 0.5)
+
+    monkeypatch.setattr(train_baseline_module, "embed_texts", fake_embed_texts)
+    fake_model = cast(SentenceTransformer, object())
+
+    embeddings = train_baseline_module._load_or_compute_bge_embeddings(  # pyright: ignore[reportPrivateUsage]
+        rows, jsonl_path, fake_model
+    )
+
+    assert call_count == 1
+    assert embeddings.shape == (len(rows), 384)
+    cache_path = jsonl_path.with_name(
+        f"train_embeddings_bge-small-en-v1.5_{BGE_REVISION_SHA[:8]}.npy"
+    )
+    assert cache_path.exists()
+
+
+def test_load_or_compute_bge_embeddings_loads_from_cache_without_recomputing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = make_rows(n_per_class=2)
+    jsonl_path = tmp_path / "train.jsonl"
+
+    call_count = 0
+
+    def fake_embed_texts(texts: list[str], _model: SentenceTransformer) -> NDArray[np.float64]:
+        nonlocal call_count
+        call_count += 1
+        return np.full((len(texts), 384), 0.5)
+
+    monkeypatch.setattr(train_baseline_module, "embed_texts", fake_embed_texts)
+    fake_model = cast(SentenceTransformer, object())
+
+    first = train_baseline_module._load_or_compute_bge_embeddings(  # pyright: ignore[reportPrivateUsage]
+        rows, jsonl_path, fake_model
+    )
+    second = train_baseline_module._load_or_compute_bge_embeddings(  # pyright: ignore[reportPrivateUsage]
+        rows, jsonl_path, fake_model
+    )
+
+    assert call_count == 1  # only computed once; second call read the cache
+    assert np.array_equal(first, second)
+
+
+def test_load_or_compute_bge_embeddings_raises_on_stale_cache_row_count(
+    tmp_path: Path,
+) -> None:
+    rows = make_rows(n_per_class=2)
+    jsonl_path = tmp_path / "train.jsonl"
+    cache_path = jsonl_path.with_name(
+        f"train_embeddings_bge-small-en-v1.5_{BGE_REVISION_SHA[:8]}.npy"
+    )
+    np.save(cache_path, np.zeros((len(rows) + 1, 384)))
+    fake_model = cast(SentenceTransformer, object())
+
+    with pytest.raises(ValueError, match="stale"):
+        train_baseline_module._load_or_compute_bge_embeddings(  # pyright: ignore[reportPrivateUsage]
+            rows, jsonl_path, fake_model
+        )
+
+
+def test_format_config_label_for_bge_model_types() -> None:
+    config = {
+        "model_type": "logreg_bge",
+        "model_hyperparams": {"C": 1.0, "penalty": "l2"},
+    }
+
+    label = format_config_label(config)
+
+    assert "bge-small-en-v1.5" in label
+    assert "logreg({'C': 1.0, 'penalty': 'l2'})" in label
+
+
+@pytest.mark.slow
+def test_run_training_pipeline_logreg_bge_and_xgboost_bge_end_to_end(tmp_path: Path) -> None:
+    """Real load_bge_model() + real embed_texts() end to end, on a tiny row
+    count so this stays fast even with a real model load. Confirms the BGE
+    path produces a BaselineArtifact with feature_source="bge", no
+    vectorizers, and the five pinned BGE params recorded in `.extra`.
+    """
+    train_rows = make_rows(n_per_class=2)
+    val_rows = make_rows(n_per_class=1, start_issue=1000)
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    write_rows(train_rows, train_path)
+    write_rows(val_rows, val_path)
+
+    for model_type in ("logreg_bge", "xgboost_bge"):
+        model_out = tmp_path / f"{model_type}_model.joblib"
+        metrics_out = tmp_path / f"{model_type}_metrics.json"
+
+        run_training_pipeline(train_path, val_path, model_out, metrics_out, model_type=model_type)
+
+        artifact: BaselineArtifact = joblib.load(model_out)  # pyright: ignore
+        assert artifact.feature_source == "bge"
+        assert artifact.word_vectorizer is None
+        assert artifact.char_vectorizer is None
+        assert artifact.extra["model_name"] == BGE_MODEL_NAME
+        assert artifact.extra["revision_sha"] == BGE_REVISION_SHA
+        assert "max_seq_len" in artifact.extra
+        assert "pooling" in artifact.extra
+        assert "normalize" in artifact.extra
+
+    # both variants should have shared the same embedding cache files, computed once.
+    short_sha = BGE_REVISION_SHA[:8]
+    assert (tmp_path / f"train_embeddings_bge-small-en-v1.5_{short_sha}.npy").exists()
+    assert (tmp_path / f"val_embeddings_bge-small-en-v1.5_{short_sha}.npy").exists()

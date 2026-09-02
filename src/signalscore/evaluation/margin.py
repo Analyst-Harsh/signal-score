@@ -36,13 +36,25 @@ from signalscore.training.strategies import get_strategy
 from signalscore.training.train_baseline import (
     BaselineArtifact,
     FittedVectorizers,
+    build_bge_feature_matrix,
     build_feature_matrix,
     compute_metrics,
     extract_labels,
 )
 
 if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
     from signalscore.evaluation.gate import GateContext
+
+# Must come after the strategies/train_baseline imports above (a real,
+# non-TYPE_CHECKING import, deliberately kept out of the sorted block above):
+# train_baseline imports xgboost as its literal first line specifically to
+# force xgboost's native libs to load before sentence_transformers/torch
+# anywhere else in this process (see train_baseline.py's own comment) --
+# importing embeddings any earlier here would defeat that ordering and
+# segfault the interpreter.
+from signalscore.features.embeddings import embed_texts, load_bge_model
 
 N_BOOTSTRAP = 1000
 _BOOTSTRAP_SEED = 42
@@ -51,7 +63,10 @@ MAX_BRIER_REGRESSION = 0.01
 
 
 def score_artifact(
-    artifact: BaselineArtifact, rows: list[FeatureRow]
+    artifact: BaselineArtifact,
+    rows: list[FeatureRow],
+    *,
+    bge_model: SentenceTransformer | None = None,
 ) -> tuple[NDArray[np.str_], NDArray[np.str_], NDArray[np.float64], list[str]]:
     """Transforms `rows` with `artifact`'s OWN fitted vectorizers (never the
     other artifact's) and returns (y_true, y_pred, y_proba, classes).
@@ -60,9 +75,36 @@ def score_artifact(
     logic to compute the candidate's metrics for its `EXPERIMENTS.md` row,
     rather than duplicating a third copy of "transform with an artifact's own
     vectorizers, then predict" alongside this module and `contract.py`.
+
+    `bge_model` lets a caller that already has a warm BGE model (serving's
+    `app.state`-cached instance) pass it in to skip a reload; callers that
+    don't (gate steps, `run_gate.py`, ad-hoc scripts) get a fresh
+    `load_bge_model()` per call -- one model load per `score_artifact` call,
+    not per request, which is fine since those call sites run far less often
+    than `/score`. Ignored entirely for `feature_source == "tfidf"` artifacts.
+    Always embeds live for BGE artifacts -- never a cache lookup, since this
+    is called generically on arbitrary row lists (a contract sample, the full
+    eval set, a single request), not a fixed named split like training's own
+    `.npy` cache.
     """
-    vectorizers = FittedVectorizers(word=artifact.word_vectorizer, char=artifact.char_vectorizer)
-    x = build_feature_matrix(rows, vectorizers)
+    if artifact.feature_source == "bge":
+        model = (
+            bge_model if bge_model is not None else load_bge_model(artifact.extra["revision_sha"])
+        )
+        embeddings = embed_texts([row.text for row in rows], model)
+        x = build_bge_feature_matrix(rows, embeddings)
+    else:
+        # A "tfidf" artifact always carries real fitted vectorizers -- only a
+        # "bge" artifact (handled above) legitimately has None here.
+        if artifact.word_vectorizer is None or artifact.char_vectorizer is None:
+            raise ValueError(
+                f"feature_source={artifact.feature_source!r} artifact is missing "
+                "word_vectorizer/char_vectorizer -- a tfidf artifact must have both"
+            )
+        vectorizers = FittedVectorizers(
+            word=artifact.word_vectorizer, char=artifact.char_vectorizer
+        )
+        x = build_feature_matrix(rows, vectorizers)
     x = get_strategy(artifact.model_type).transform_for_predict(x, artifact.extra)
     y_true = extract_labels(rows)
     y_pred: NDArray[np.str_] = artifact.model.predict(x)  # pyright: ignore

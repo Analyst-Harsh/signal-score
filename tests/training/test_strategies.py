@@ -84,11 +84,13 @@ def test_train_returns_a_trained_model_and_expected_extra_shape(strategy_name: s
     assert hasattr(model, "predict_proba")
     assert hasattr(model, "classes_")
 
-    if strategy_name == "logreg":
+    if strategy_name in ("logreg", "logreg_bge"):
         assert set(extra) == {"feature_std"}
-    else:
+    elif strategy_name == "xgboost":
         assert set(extra) == {"reducer"}
         assert isinstance(extra["reducer"], TruncatedSVD)
+    else:
+        assert extra == {}
 
 
 @pytest.mark.parametrize("strategy_name", sorted(STRATEGIES))
@@ -113,6 +115,18 @@ def test_feature_importance_shape(strategy_name: str) -> None:
     rows = make_rows(n_per_class=8)
     artifact = _build_artifact(strategy_name, rows)
 
+    if strategy_name.endswith("_bge"):
+        if strategy_name == "logreg_bge":
+            # BaselineArtifact doesn't have a real `feature_source` field yet
+            # (a sibling in-flight change adds it) -- this artifact was built
+            # from TF-IDF vectorizers regardless of strategy_name, so the
+            # guard needs the field faked here to exercise the BGE path until
+            # that field lands for real.
+            artifact.feature_source = "bge"  # pyright: ignore[reportAttributeAccessIssue]
+        with pytest.raises(NotImplementedError):
+            get_strategy(strategy_name).feature_importance(artifact, top_n=5)
+        return
+
     report = get_strategy(strategy_name).feature_importance(artifact, top_n=5)
 
     if strategy_name == "logreg":
@@ -122,6 +136,45 @@ def test_feature_importance_shape(strategy_name: str) -> None:
 
     for entries in report.values():
         assert entries
+
+
+def test_xgboost_bge_strategy_trains_on_dense_array_and_round_trips_predict() -> None:
+    """BGE artifacts pass a plain dense ndarray (no scipy sparse), unlike
+    TF-IDF's sparse design matrix -- exactly the shape XGBoostStrategy's
+    _slice_and_densify would crash on (`.toarray()` has no meaning on a plain
+    ndarray). XGBoostBgeStrategy skips slicing/SVD entirely, so training and
+    the transform_for_predict -> predict/predict_proba round trip must work
+    on this shape with no incident.
+    """
+    rng = np.random.default_rng(42)
+    n_per_class = 8
+    labels = np.array(
+        [c for c in ("P0_critical", "P1_soon", "P2_backlog") for _ in range(n_per_class)]
+    )
+    n = len(labels)
+    x = np.hstack([rng.normal(size=(n, 384)), rng.integers(0, 2, size=(n, 1)).astype(np.float64)])
+
+    strategy = get_strategy("xgboost_bge")
+    model, extra = strategy.train(x, labels)
+
+    assert extra == {}
+    transformed = strategy.transform_for_predict(x, extra)
+    assert transformed is x  # identity -- no reducer to apply
+
+    predictions = model.predict(transformed)
+    assert predictions.shape == (n,)
+    assert set(predictions) <= set(labels)
+
+    probabilities = model.predict_proba(transformed)
+    assert probabilities.shape == (n, 3)
+
+
+def test_xgboost_bge_strategy_feature_importance_raises_not_implemented() -> None:
+    rows = make_rows(n_per_class=8)
+    artifact = _build_artifact("xgboost_bge", rows)
+
+    with pytest.raises(NotImplementedError):
+        get_strategy("xgboost_bge").feature_importance(artifact, top_n=5)
 
 
 def test_get_strategy_bogus_raises_value_error_naming_valid_choices() -> None:

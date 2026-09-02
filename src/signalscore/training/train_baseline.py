@@ -10,13 +10,23 @@ Locked spec: docs/v0-feature-selection.md. Fits vectorizers + classifier on
 refit. Never reads eval_set_v1.jsonl or any test-split row.
 """
 
+# xgboost must be imported before sentence_transformers/torch in this process:
+# once torch has loaded its OpenMP runtime, a later `XGBClassifier(...).fit()`
+# call segfaults the interpreter (confirmed empirically on macOS arm64 --
+# `import torch` then any real xgboost fit crashes; the reverse order does
+# not). `signalscore.features.embeddings` imports sentence_transformers (and
+# therefore torch) at module level below, so this bare import has to run
+# first -- it is a real ordering dependency, not lint noise, so it is
+# deliberately kept out of the sorted import blocks below.
+import xgboost  # noqa: F401, I001 # pyright: ignore[reportUnusedImport]
+
 import argparse
 import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import joblib
 import mlflow
@@ -25,6 +35,7 @@ import scipy
 import sklearn
 from numpy.typing import NDArray
 from scipy import sparse
+from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingTypeStubs]
 from sklearn.feature_extraction.text import (  # pyright: ignore[reportMissingTypeStubs]
     TfidfVectorizer,
 )
@@ -38,6 +49,15 @@ from sklearn.preprocessing import (
     label_binarize,  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
 )
 
+from signalscore.features.embeddings import (
+    BGE_MAX_SEQ_LEN,
+    BGE_MODEL_NAME,
+    BGE_NORMALIZE,
+    BGE_POOLING,
+    BGE_REVISION_SHA,
+    embed_texts,
+    load_bge_model,
+)
 from signalscore.features.labels import Priority
 from signalscore.features.schema import FeatureRow
 from signalscore.registry import ModelRegistry
@@ -123,33 +143,82 @@ def build_feature_matrix(rows: list[FeatureRow], vectorizers: FittedVectorizers)
     )
 
 
+def build_bge_feature_matrix(
+    rows: list[FeatureRow], embeddings: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Dense hstack of [embeddings | is_member_plus] -- no vectorizers, unlike
+    build_feature_matrix.
+    """
+    if embeddings.shape[0] != len(rows):
+        raise ValueError(
+            f"embeddings row count ({embeddings.shape[0]}) does not match "
+            f"rows ({len(rows)}) -- would silently misalign rows and labels"
+        )
+    member_column = np.array([[1.0 if row.is_member_plus else 0.0] for row in rows])
+    return np.hstack([embeddings, member_column])
+
+
+def _load_or_compute_bge_embeddings(
+    rows: list[FeatureRow], jsonl_path: Path, model: SentenceTransformer
+) -> NDArray[np.float64]:
+    """Caches BGE embeddings next to the split's own jsonl file, keyed by that
+    file's stem and the pinned model revision -- for this training entry
+    point's repeated use across a hyperparameter sweep on the same split only.
+    score_artifact() always embeds live and never reads this cache, since it
+    is called generically on arbitrary row lists, not a fixed named split.
+    """
+    short_sha = BGE_REVISION_SHA[:8]
+    cache_name = f"{jsonl_path.stem}_embeddings_bge-small-en-v1.5_{short_sha}.npy"
+    cache_path = jsonl_path.with_name(cache_name)
+    if cache_path.exists():
+        embeddings = np.load(cache_path)
+        if embeddings.shape[0] != len(rows):
+            raise ValueError(
+                f"cached embeddings at {cache_path} have {embeddings.shape[0]} rows, "
+                f"expected {len(rows)} -- stale/mismatched cache, delete and re-run"
+            )
+        return embeddings
+
+    embeddings = embed_texts([row.text for row in rows], model)
+    np.save(cache_path, embeddings)
+    print(f"wrote {cache_path} -- remember to `dvc add {cache_path}` (manual follow-up step)")
+    return embeddings
+
+
 def extract_labels(rows: list[FeatureRow]) -> NDArray[np.str_]:
     return np.array([row.label.value for row in rows])
 
 
 @dataclass
 class BaselineArtifact:
-    word_vectorizer: TfidfVectorizer
-    char_vectorizer: TfidfVectorizer
+    # Required-but-nullable, not defaulted: these come before `model`/`classes`
+    # (also no default), and Python dataclasses require every no-default field
+    # to precede every defaulted field. A BGE artifact has no vectorizers at
+    # all, so every real call site passes them as keyword args -- a real
+    # vectorizer for the TF-IDF path, explicit None for the BGE path.
+    word_vectorizer: TfidfVectorizer | None
+    char_vectorizer: TfidfVectorizer | None
     model: TrainedModel
     classes: list[str]
     model_type: str = "logreg"
     extra: dict[str, Any] = field(default_factory=lambda: {})
+    feature_source: Literal["tfidf", "bge"] = "tfidf"
     # legacy field, backward-compat only -- see __setstate__
     feature_std: NDArray[np.float64] | None = None
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         # Pickle restores dataclass instances via __dict__.update(), bypassing
         # __init__ defaults entirely -- an already-pickled pre-refactor artifact's
-        # __dict__ has NO model_type/extra key at all, not "missing with the
-        # default applied". Backfill explicitly, or the currently-registered
-        # production baseline_v0 pickle becomes unloadable (AttributeError) the
-        # moment any code reads artifact.model_type.
+        # __dict__ has NO model_type/extra/feature_source key at all, not
+        # "missing with the default applied". Backfill explicitly, or the
+        # currently-registered production baseline_v0 pickle becomes unloadable
+        # (AttributeError) the moment any code reads artifact.model_type.
         state.setdefault("model_type", "logreg")
         state.setdefault(
             "extra",
             {"feature_std": state["feature_std"]} if state.get("feature_std") is not None else {},
         )
+        state.setdefault("feature_source", "tfidf")
         self.__dict__.update(state)
 
 
@@ -258,42 +327,78 @@ def train_and_evaluate(
     word_sublinear_tf: bool = DEFAULT_WORD_SUBLINEAR_TF,
     model_type: str = "logreg",
     model_hyperparams: dict[str, Any] | None = None,
+    train_embeddings: NDArray[np.float64] | None = None,
+    val_embeddings: NDArray[np.float64] | None = None,
 ) -> tuple[BaselineArtifact, dict[str, Any]]:
     """Fit-on-train / evaluate-on-val core, with no disk or MLflow I/O -- the
     reusable entry point for both a single training run (`run_training_pipeline`)
     and a hyperparameter sweep (`tune_baseline.py`), which calls this in a loop
     without reloading rows from disk each time.
+
+    `train_embeddings`/`val_embeddings` are required (and only used) when
+    `model_type` is one of the BGE variants -- the embedding I/O itself lives
+    in `run_training_pipeline`, per this function's own no-disk-I/O contract.
     """
-    vectorizers = fit_vectorizers(
-        [row.text for row in train_rows],
-        word_ngram_range=word_ngram_range,
-        word_min_df=word_min_df,
-        word_sublinear_tf=word_sublinear_tf,
+    feature_source: Literal["tfidf", "bge"] = (
+        "bge" if model_type in ("logreg_bge", "xgboost_bge") else "tfidf"
     )
-    x_train = build_feature_matrix(train_rows, vectorizers)
-    x_val = build_feature_matrix(val_rows, vectorizers)
+
+    vectorizers: FittedVectorizers | None
+    if feature_source == "bge":
+        if train_embeddings is None or val_embeddings is None:
+            raise ValueError(
+                f"model_type={model_type!r} requires train_embeddings and "
+                "val_embeddings -- caller (run_training_pipeline) must compute them first"
+            )
+        vectorizers = None
+        x_train = build_bge_feature_matrix(train_rows, train_embeddings)
+        x_val = build_bge_feature_matrix(val_rows, val_embeddings)
+    else:
+        vectorizers = fit_vectorizers(
+            [row.text for row in train_rows],
+            word_ngram_range=word_ngram_range,
+            word_min_df=word_min_df,
+            word_sublinear_tf=word_sublinear_tf,
+        )
+        x_train = build_feature_matrix(train_rows, vectorizers)
+        x_val = build_feature_matrix(val_rows, vectorizers)
+
     y_train = extract_labels(train_rows)
     y_val = extract_labels(val_rows)
 
     strategy = get_strategy(model_type)
-    model, extra = strategy.train(
+    model, strategy_extra = strategy.train(
         x_train, y_train, x_val=x_val, y_val=y_val, **(model_hyperparams or {})
     )
     classes = [str(c) for c in model.classes_]  # pyright: ignore
 
-    x_val_for_predict = strategy.transform_for_predict(x_val, extra)
+    x_val_for_predict = strategy.transform_for_predict(x_val, strategy_extra)
     y_pred: NDArray[np.str_] = model.predict(x_val_for_predict)  # pyright: ignore
     y_proba: NDArray[np.float64] = model.predict_proba(x_val_for_predict)  # pyright: ignore
 
     metrics = compute_metrics(y_val, y_pred, y_proba, classes)  # pyright: ignore[reportUnknownArgumentType]
 
+    extra = (
+        {
+            **strategy_extra,
+            "model_name": BGE_MODEL_NAME,
+            "revision_sha": BGE_REVISION_SHA,
+            "max_seq_len": BGE_MAX_SEQ_LEN,
+            "pooling": BGE_POOLING,
+            "normalize": BGE_NORMALIZE,
+        }
+        if feature_source == "bge"
+        else strategy_extra
+    )
+
     artifact = BaselineArtifact(
-        word_vectorizer=vectorizers.word,
-        char_vectorizer=vectorizers.char,
+        word_vectorizer=vectorizers.word if vectorizers else None,
+        char_vectorizer=vectorizers.char if vectorizers else None,
         model=model,
         classes=classes,
         model_type=model_type,
         extra=extra,
+        feature_source=feature_source,
     )
     return artifact, metrics
 
@@ -313,6 +418,13 @@ def run_training_pipeline(
     train_rows = load_feature_rows(train_path)
     val_rows = load_feature_rows(val_path)
 
+    train_embeddings: NDArray[np.float64] | None = None
+    val_embeddings: NDArray[np.float64] | None = None
+    if model_type in ("logreg_bge", "xgboost_bge"):
+        bge_model = load_bge_model(BGE_REVISION_SHA)
+        train_embeddings = _load_or_compute_bge_embeddings(train_rows, train_path, bge_model)
+        val_embeddings = _load_or_compute_bge_embeddings(val_rows, val_path, bge_model)
+
     artifact, metrics = train_and_evaluate(
         train_rows,
         val_rows,
@@ -321,6 +433,8 @@ def run_training_pipeline(
         word_sublinear_tf=word_sublinear_tf,
         model_type=model_type,
         model_hyperparams=model_hyperparams,
+        train_embeddings=train_embeddings,
+        val_embeddings=val_embeddings,
     )
 
     save_artifact(artifact, model_out)
@@ -335,8 +449,15 @@ def format_config_label(config: dict[str, Any]) -> str:
     and recommended next command. Built from the actual config every time,
     never a static string, since hyperparameters are CLI-tunable.
     """
-    lo, hi = config["word_ngram_range"]
     model_type = config.get("model_type", "logreg")
+    if model_type in ("logreg_bge", "xgboost_bge"):
+        family = model_type.removesuffix("_bge")
+        hyperparams = config.get("model_hyperparams", {})
+        return (
+            f"{MODEL_VERSION}: bge-small-en-v1.5(384d, normalized) + is_member_plus "
+            f"-> {family}({hyperparams})"
+        )
+    lo, hi = config["word_ngram_range"]
     hyperparams = config.get("model_hyperparams", {})
     return (
         f"{MODEL_VERSION}: tfidf(word {lo}-{hi} min_df={config['word_min_df']} "
@@ -364,7 +485,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_WORD_SUBLINEAR_TF,
     )
-    parser.add_argument("--model-type", default="logreg", choices=["logreg", "xgboost"])
+    parser.add_argument(
+        "--model-type",
+        default="logreg",
+        choices=["logreg", "xgboost", "logreg_bge", "xgboost_bge"],
+    )
     parser.add_argument("--model-hyperparams", type=json.loads, default="{}")
     parser.add_argument("--notes", default="")
     return parser.parse_args(argv)
@@ -377,7 +502,7 @@ def main(argv: list[str] | None = None) -> None:
     model_out = args.model_out or default_dir / MODEL_ARTIFACT_FILENAME
     metrics_out = args.metrics_out or default_dir / "metrics.json"
 
-    if args.model_type == "logreg":
+    if args.model_type in ("logreg", "logreg_bge"):
         model_hyperparams: dict[str, Any] = {"C": args.C, "penalty": args.penalty}
     else:
         model_hyperparams = args.model_hyperparams
@@ -418,6 +543,20 @@ def main(argv: list[str] | None = None) -> None:
                 **(
                     {"class_weight": "balanced", "max_iter": 1000}
                     if config["model_type"] == "logreg"
+                    else {}
+                ),
+                # BGE's five pinned params are module constants, not sweep-tunable
+                # like model_hyperparams -- logged under their own prefix so they
+                # never get flattened into the same namespace as real hyperparams.
+                **(
+                    {
+                        "bge_config.model_name": BGE_MODEL_NAME,
+                        "bge_config.revision_sha": BGE_REVISION_SHA,
+                        "bge_config.max_seq_len": BGE_MAX_SEQ_LEN,
+                        "bge_config.pooling": BGE_POOLING,
+                        "bge_config.normalize": BGE_NORMALIZE,
+                    }
+                    if config["model_type"] in ("logreg_bge", "xgboost_bge")
                     else {}
                 ),
                 # Flattened, not the nested dict itself -- mlflow.log_params
