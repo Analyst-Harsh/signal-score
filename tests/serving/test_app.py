@@ -8,6 +8,7 @@ code (here, the FastAPI lifespan) pointed at that tmp_path DB via the
 MLFLOW_TRACKING_URI env var.
 """
 
+import functools
 import os
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from mlflow.tracking import MlflowClient
 from numpy.typing import NDArray
 
 from signalscore.features.labels import Priority
+from signalscore.monitoring.buffer import load_live_traffic, record_live_traffic
 from signalscore.registry import DEFAULT_MODEL_NAME, ModelRegistry
 from signalscore.serving.app import (
     ScoreRequest,
@@ -164,6 +166,48 @@ def test_score_returns_prediction_when_production_model_exists(
     assert set(body["priority_probabilities"]) == valid_classes
     assert abs(sum(body["priority_probabilities"].values()) - 1.0) < 1e-6
     assert body["model_version"] == expected_version
+
+
+def test_score_records_live_traffic_for_drift_monitoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A /score call must append one buffer entry -- monitoring's whole
+    input-drift signal depends on this actually happening. Redirects the
+    real record_live_traffic to a tmp_path file (functools.partial around
+    the real function, not a fake) so this test doesn't write into the
+    actual repo's data/monitoring/ directory.
+    """
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    client = MlflowClient(tracking_uri=tracking_uri)
+    registry = ModelRegistry(client=client, model_name=DEFAULT_MODEL_NAME)
+    _register_and_promote_production(client, registry, tmp_path)
+
+    buffer_path = tmp_path / "live_traffic.jsonl"
+    monkeypatch.setattr(
+        "signalscore.serving.app.record_live_traffic",
+        functools.partial(record_live_traffic, path=buffer_path),
+    )
+
+    original_tracking_uri = mlflow.get_tracking_uri()  # pyright: ignore[reportUnknownMemberType]
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
+    try:
+        with TestClient(app) as test_client:
+            response = test_client.post(
+                "/score",
+                json={
+                    "title": "critical outage",
+                    "body": "pod crash cluster panic urgent failure",
+                    "author_association": "MEMBER",
+                },
+            )
+    finally:
+        mlflow.set_tracking_uri(original_tracking_uri)  # pyright: ignore[reportUnknownMemberType]
+
+    assert response.status_code == 200
+    frame = load_live_traffic(buffer_path)
+    assert len(frame) == 1
+    assert frame["predicted_class"].iloc[0] == response.json()["priority_class"]
+    assert frame["text"].iloc[0] == "critical outage\npod crash cluster panic urgent failure"
 
 
 def test_startup_fails_fast_when_no_production_model_registered(
