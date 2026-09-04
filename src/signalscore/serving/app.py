@@ -35,6 +35,7 @@ from signalscore.features.embeddings import load_bge_model
 from signalscore.features.labels import Priority
 from signalscore.features.pipeline import build_features
 from signalscore.features.schema import FeatureRow
+from signalscore.monitoring.buffer import record_live_traffic
 from signalscore.registry import ModelRegistry
 from signalscore.settings import Settings
 from signalscore.training.train_baseline import MODEL_ARTIFACT_FILENAME, BaselineArtifact
@@ -123,6 +124,15 @@ def score(payload: ScoreRequest) -> ScoreResponse:
     priority_class = str(y_pred[0])
     probabilities = {cls: float(p) for cls, p in zip(classes, y_proba[0], strict=True)}
     latency_ms = (time.perf_counter() - started) * 1000
+
+    try:
+        record_live_traffic(row, priority_class)
+    except Exception as e:
+        # The drift-monitoring buffer is a side channel, not a scoring
+        # dependency -- nothing on this path (disk I/O, serialization) may
+        # ever fail /score itself (see monitoring/buffer.py's own
+        # docstring), so this is deliberately broad, not just OSError.
+        logger.warning("live_traffic_buffer_write_failed", error=str(e))
 
     logger.info(
         "score_request",

@@ -34,6 +34,9 @@ serving = [
 embeddings = [
     "sentence-transformers>=3.0",
 ]
+monitoring = [
+    "evidently>=0.7",
+]
 
 [dependency-groups]
 dev = [
@@ -45,6 +48,7 @@ dev = [
     "lefthook>=1.9",
     "dvc>=3.67.1",
     "httpx2>=2.12.0",
+    "pandas-stubs>=2.2",
 ]
 
 [tool.hatch.build.targets.wheel]

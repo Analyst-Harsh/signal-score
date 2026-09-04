@@ -13,6 +13,7 @@ mlruns/
 mlflow.db
 wandb/
 dvc-storage/
+data/monitoring/
 
 .agents/skills/lavish/
 .claude/skills/lavish

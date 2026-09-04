@@ -1,7 +1,7 @@
 .PHONY: install lint format format-check typecheck test check
 
 install:
-	uv sync --group dev --extra ml --extra serving
+	uv sync --group dev --extra ml --extra serving --extra monitoring
 	uv run lefthook install
 
 lint:
